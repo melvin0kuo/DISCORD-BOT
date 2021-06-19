@@ -3,6 +3,6 @@ const client = new Discord.Client()
 client.on('message', message => {
 	console.log(message.content);
 });
-bot_secret_token = "NjgwMjUwNzIxNzQ0MTkxNDg4.XmNEBw.0Sq2PCksGnf5gV9swF8Diik3NvE"
+bot_secret_token = "NjgwMjUwNzIxNzQ0MTkxNDg4.Xk9K2g.CPWSO8Elq9sw6uh0qRDmmYQVgGM"
 
 client.login(bot_secret_token)
