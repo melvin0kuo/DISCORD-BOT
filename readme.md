@@ -60,7 +60,7 @@ python main.py
 
 ## 授權 (License)
 
-本專案目前未提供明確的授權資訊。
+MIT License
 
 ---
 
