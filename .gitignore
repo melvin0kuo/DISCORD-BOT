@@ -1,0 +1,3 @@
+models/
+.env
+LOCAL_MODEL_USE_FLASH_ATTN/

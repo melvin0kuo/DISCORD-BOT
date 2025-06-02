@@ -1,0 +1,7 @@
+2025-04-14 20:14:01,190:WARNING:discord.client: PyNaCl is not installed, voice will NOT be supported
+2025-04-14 20:14:02,115:INFO:discord: 已載入 conversation cog
+2025-04-14 20:14:02,116:INFO:discord.client: logging in using static token
+2025-04-14 20:14:13,023:INFO:discord.gateway: Shard ID None has connected to Gateway (Session ID: 063d2636ff70195f0f707d48b69c78ea).
+2025-04-14 20:14:16,267:INFO:discord: 機器人已登入為: 島田 愛里壽
+2025-04-14 20:14:16,267:INFO:discord: 機器人 ID: 680250721744191488
+2025-04-14 20:14:16,268:INFO:discord: Discord.py 版本: 2.5.2
