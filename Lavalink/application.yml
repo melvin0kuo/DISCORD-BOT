@@ -1,0 +1,36 @@
+server:
+  port: 8080
+  address: 0.0.0.0
+  password: testpassword
+  sources:
+    youtube: true
+    bandcamp: true
+    soundcloud: true
+    twitch: true
+    vimeo: true
+    http: true
+    local: false
+
+lavalink:
+  server:
+    sources:
+      youtube: true
+
+youtube:
+  plugin:
+    enabled: true
+    youtubeConfig:
+      clients:
+        - WEB_REMIX
+        - WEB
+        - TVHTML5_SIMPLY_EMBEDDED_PLAYER
+
+logging:
+  file:
+    path: ./logs/
+  level:
+    root: INFO
+    lavalink: INFO
+    lavaplayer: INFO
+    org.springframework: WARN
+    org.slf4j: WARN

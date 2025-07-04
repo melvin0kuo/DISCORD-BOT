@@ -24,7 +24,8 @@ class LLMHandler:
         self.bot_name = bot_name
         self.current_llm_type = config.DEFAULT_LLM_TYPE
         self.system_prompt = config.LLM_SYSTEM_PROMPT.format(bot_name=bot_name)
-        self.conversation_history = {}  # 用戶 ID -> 對話歷史
+        # 用戶 ID -> 頻道 ID -> 對話歷史
+        self.conversation_history = {}
         self.max_history_length = config.MAX_HISTORY_LENGTH
         
         # 初始化各種 LLM 客戶端
@@ -160,25 +161,27 @@ class LLMHandler:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
     
-    def _get_user_history(self, user_id: str) -> List[Dict[str, str]]:
-        """獲取用戶的對話歷史"""
+    def _get_user_history(self, user_id: str, channel_id: str) -> List[Dict[str, str]]:
+        """獲取用戶在特定頻道的對話歷史"""
         if user_id not in self.conversation_history:
-            self.conversation_history[user_id] = []
-        return self.conversation_history[user_id]
+            self.conversation_history[user_id] = {}
+        if channel_id not in self.conversation_history[user_id]:
+            self.conversation_history[user_id][channel_id] = []
+        return self.conversation_history[user_id][channel_id]
     
-    def add_to_history(self, user_id: str, role: str, content: str):
-        """添加消息到用戶的對話歷史"""
-        history = self._get_user_history(user_id)
+    def add_to_history(self, user_id: str, channel_id: str, role: str, content: str):
+        """添加消息到用戶在特定頻道的對話歷史"""
+        history = self._get_user_history(user_id, channel_id)
         history.append({"role": role, "content": content})
-        
+
         # 如果歷史記錄超過最大長度，移除最舊的消息
         while len(history) > self.max_history_length:
             history.pop(0)
     
-    def clear_history(self, user_id: str):
-        """清除用戶的對話歷史"""
-        if user_id in self.conversation_history:
-            self.conversation_history[user_id] = []
+    def clear_history(self, user_id: str, channel_id: str):
+        """清除用戶在特定頻道的對話歷史"""
+        if user_id in self.conversation_history and channel_id in self.conversation_history[user_id]:
+            self.conversation_history[user_id][channel_id] = []
             return True
         return False
     
@@ -254,58 +257,54 @@ class LLMHandler:
         
         return model_info
     
-    async def get_llm_response(self, user_id: str, message: str, stream: bool = False) -> Union[str, Generator[str, None, None]]:
-        """獲取 LLM 回應，支援故障轉移"""
+    async def get_llm_response(self, user_id: str, channel_id: str, message: str, stream: bool = False) -> Union[str, Generator[str, None, None]]:
+        """獲取 LLM 回應，支援故障轉移（每用戶每頻道）"""
         # 添加用戶消息到歷史記錄
-        self.add_to_history(user_id, "user", message)
-        
+        self.add_to_history(user_id, channel_id, "user", message)
+
         # 嘗試使用當前模型
         try:
             if stream:
-                response_stream = await self._get_response_from_model(user_id, message, stream=True)
+                response_stream = await self._get_response_from_model(user_id, channel_id, message, stream=True)
                 return response_stream
             else:
-                response = await self._get_response_from_model(user_id, message)
+                response = await self._get_response_from_model(user_id, channel_id, message)
                 # 添加助手回應到歷史記錄
-                self.add_to_history(user_id, "assistant", response)
+                self.add_to_history(user_id, channel_id, "assistant", response)
                 return response
         except Exception as e:
             logger.error(f"使用 {self.current_llm_type} 模型時出錯: {e}")
-            
+
             # 如果啟用了故障轉移且當前模型是本地模型
             if config.ENABLE_FALLBACK and self.current_llm_type in ["local_python", "local", "local_gguf"]:
                 fallback_type = config.FALLBACK_LLM_TYPE
                 logger.info(f"嘗試使用備用模型 {fallback_type}")
-                
+
                 # 暫時切換到備用模型
                 original_type = self.current_llm_type
                 self.current_llm_type = fallback_type
-                
+
                 try:
                     if stream:
-                        response_stream = await self._get_response_from_model(user_id, message, stream=True)
-                        # 恢復原始模型設置
+                        response_stream = await self._get_response_from_model(user_id, channel_id, message, stream=True)
                         self.current_llm_type = original_type
                         return response_stream
                     else:
-                        response = await self._get_response_from_model(user_id, message)
-                        # 添加助手回應到歷史記錄
-                        self.add_to_history(user_id, "assistant", response)
-                        # 恢復原始模型設置
+                        response = await self._get_response_from_model(user_id, channel_id, message)
+                        self.add_to_history(user_id, channel_id, "assistant", response)
                         self.current_llm_type = original_type
                         return f"[使用備用模型 {fallback_type}] {response}"
                 except Exception as fallback_error:
-                    # 恢復原始模型設置
                     self.current_llm_type = original_type
                     logger.error(f"備用模型 {fallback_type} 也失敗: {fallback_error}")
                     return f"主模型和備用模型均失敗。錯誤: {str(e)}"
-            
+
             return f"獲取回應時出錯: {str(e)}"
     
-    async def _get_response_from_model(self, user_id: str, message: str, stream: bool = False) -> Union[str, Generator[str, None, None]]:
-        """從特定模型獲取回應"""
-        history = self._get_user_history(user_id)
-        
+    async def _get_response_from_model(self, user_id: str, channel_id: str, message: str, stream: bool = False) -> Union[str, Generator[str, None, None]]:
+        """從特定模型獲取回應（每用戶每頻道）"""
+        history = self._get_user_history(user_id, channel_id)
+
         if self.current_llm_type == "openai":
             return await self._get_openai_response(history, stream)
         elif self.current_llm_type == "anthropic":
@@ -320,6 +319,26 @@ class LLMHandler:
             return await self._get_local_gguf_response(history, stream)
         else:
             raise ValueError(f"不支援的 LLM 類型: {self.current_llm_type}")
+
+    async def _get_local_python_response(self, history: List[Dict[str, str]], stream: bool = False) -> str:
+        """使用本地 Hugging Face 模型生成回應"""
+        prompt = self.system_prompt + "\n"
+        for msg in history:
+            if msg["role"] == "user":
+                prompt += f"使用者: {msg['content']}\n"
+            else:
+                prompt += f"{self.bot_name}: {msg['content']}\n"
+        loader = ModelLoader.get_instance()
+        generation_config = {
+            "max_new_tokens": getattr(config, "LOCAL_MODEL_MAX_NEW_TOKENS", 512),
+            "temperature": getattr(config, "LOCAL_MODEL_TEMPERATURE", 0.7),
+            "top_p": getattr(config, "LOCAL_MODEL_TOP_P", 0.9),
+            "repetition_penalty": getattr(config, "LOCAL_MODEL_REPETITION_PENALTY", 1.1),
+        }
+        # 確保模型已加載（會自動觸發下載）
+        if not loader.is_ready:
+            loader.load_model()
+        return loader.generate(prompt, generation_config)
     
     async def _get_openai_response(self, history: List[Dict[str, str]], stream: bool = False) -> Union[str, Generator[str, None, None]]:
         """從 OpenAI API 獲取回應"""

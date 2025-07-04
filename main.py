@@ -173,7 +173,7 @@ async def load_extensions():
         await bot.load_extension("cogs.conversation")
         logger.info("已載入 conversation cog")
     except Exception as e:
-        logger.error(f"載入 conversation cog 時出錯: {e}")
+        logger.error(f"載入 conversation cog 時出錯: {e}", exc_info=True)
 
 async def main():
     """主函數"""

@@ -1,4 +1,5 @@
 discord.py>=2.0.0
+wavelink>=2.5.0  # Discord 音樂播放（Lavalink Python 客戶端）
 python-dotenv>=0.19.0
 requests>=2.26.0
 aiohttp>=3.8.1

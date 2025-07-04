@@ -280,6 +280,7 @@ class ModelLoader:
             with torch.no_grad():
                 output = self.model.generate(
                     input_ids,
+                    attention_mask=inputs.attention_mask.to(self.model.device) if hasattr(inputs, "attention_mask") else None,
                     max_new_tokens=generation_config.get("max_new_tokens", 512),
                     temperature=generation_config.get("temperature", 0.7),
                     top_p=generation_config.get("top_p", 0.9),
@@ -333,6 +334,7 @@ class ModelLoader:
             # 生成參數
             gen_kwargs = {
                 "input_ids": input_ids,
+                "attention_mask": inputs.attention_mask.to(self.model.device) if hasattr(inputs, "attention_mask") else None,
                 "max_new_tokens": generation_config.get("max_new_tokens", 512),
                 "temperature": generation_config.get("temperature", 0.7),
                 "top_p": generation_config.get("top_p", 0.9),
