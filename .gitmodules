@@ -1,0 +1,6 @@
+[submodule "lavamusic"]
+	path = lavamusic
+	url = https://github.com/itzappu/lavamusic.git
+[submodule "triton"]
+	path = triton
+	url = https://github.com/triton-lang/triton.git
