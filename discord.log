@@ -9,3 +9,13 @@
 2025-10-31 13:36:37,625:INFO:discord: Discord.py 版本: 2.5.2
 2025-10-31 13:36:37,626:INFO:discord: 當前配置摘要: {'prefix': '!', 'token_set': True, 'gemini_key_set': True, 'openai_key_set': True, 'anthropic_key_set': True, 'log_level': 'INFO', 'max_history': 100, 'performance_logging': True, 'gemini_model': 'gemini-2.0-flash', 'openai_model': 'gpt-3.5-turbo', 'anthropic_model': 'claude-3-sonnet-20240229'}
 2025-10-31 13:36:37,626:INFO:discord: 機器人已準備就緒!
+2025-10-31 13:39:03,400:INFO:discord: [互動觸發] 用戶: harekaze_469(538158309757157416) | 頻道: 呱(1192476881967136783) | 私訊: False | 提及: False | 回覆: None | 內容: 不知道
+2025-10-31 13:39:09,569:INFO:discord: [互動觸發] 用戶: harekaze_469(538158309757157416) | 頻道: 呱(1192476881967136783) | 私訊: False | 提及: True | 回覆: None | 內容: <@680250721744191488> 你媽死了
+2025-10-31 13:39:22,789:INFO:discord: [互動觸發] 用戶: harekaze_469(538158309757157416) | 頻道: 呱(1192476881967136783) | 私訊: False | 提及: True | 回覆: None | 內容: <@680250721744191488> 你是煞筆嗎
+2025-10-31 13:39:23,446:INFO:discord: 用戶 harekaze_469 (538158309757157416) 的訊息: 你是煞筆嗎
+2025-10-31 13:43:05,951:INFO:discord: [互動觸發] 用戶: harekaze_469(538158309757157416) | 頻道: 呱(1192476881967136783) | 私訊: False | 提及: False | 回覆: None | 內容: <@597028717948043274> 爲啥我fork別人的模組到我這裏來，然後dc有用到fork的模組但是github裏面點進去404
+2025-10-31 13:43:27,148:INFO:discord: [互動觸發] 用戶: harekaze_469(538158309757157416) | 頻道: 呱(1192476881967136783) | 私訊: False | 提及: False | 回覆: None | 內容: 
+2025-10-31 13:43:41,045:INFO:discord: [互動觸發] 用戶: harekaze_469(538158309757157416) | 頻道: 呱(1192476881967136783) | 私訊: False | 提及: False | 回覆: None | 內容: 那個lavamusic我自己fork了一個然後鏈接到那裏去了
+2025-10-31 13:43:44,643:INFO:discord: [互動觸發] 用戶: harekaze_469(538158309757157416) | 頻道: 呱(1192476881967136783) | 私訊: False | 提及: False | 回覆: None | 內容: 可是點進去直接404
+2025-10-31 13:43:50,346:INFO:discord: [互動觸發] 用戶: harekaze_469(538158309757157416) | 頻道: 呱(1192476881967136783) | 私訊: False | 提及: False | 回覆: None | 內容: 沒跳轉到我fork的地方
+2025-10-31 13:47:11,199:INFO:discord.gateway: Shard ID None has successfully RESUMED session 485f8db97f0396a38a4f80d2d46e61f6.

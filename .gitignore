@@ -3,5 +3,4 @@ models/
 LOCAL_MODEL_USE_FLASH_ATTN/
 /llama-cpp-python
 *.log
-*.log
-*.log
+discord.log
