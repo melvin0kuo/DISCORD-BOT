@@ -9,3 +9,17 @@
 2025-10-31 13:18:42,284:INFO:discord: Discord.py 版本: 2.5.2
 2025-10-31 13:18:42,284:INFO:discord: 當前配置摘要: {'prefix': '!', 'token_set': True, 'gemini_key_set': True, 'openai_key_set': True, 'anthropic_key_set': True, 'log_level': 'INFO', 'max_history': 100, 'performance_logging': True, 'gemini_model': 'gemini-2.0-flash', 'openai_model': 'gpt-3.5-turbo', 'anthropic_model': 'claude-3-sonnet-20240229'}
 2025-10-31 13:18:42,284:INFO:discord: 機器人已準備就緒!
+2025-10-31 13:23:49,377:INFO:discord.gateway: Shard ID None session has been invalidated.
+2025-10-31 13:23:55,030:ERROR:discord: ❌ 啟動機器人時出錯: Shard ID None WebSocket closed with 4004
+Traceback (most recent call last):
+  File "C:\Users\harekaze\Documents\GitHub\DISCORD-BOT\main.py", line 428, in main
+    await bot.start(config.TOKEN)
+  File "C:\Users\harekaze\anaconda3\envs\discord\Lib\site-packages\discord\client.py", line 824, in start
+    await self.connect(reconnect=reconnect)
+  File "C:\Users\harekaze\anaconda3\envs\discord\Lib\site-packages\discord\client.py", line 704, in connect
+    await self.ws.poll_event()
+  File "C:\Users\harekaze\anaconda3\envs\discord\Lib\site-packages\discord\gateway.py", line 650, in poll_event
+    raise ConnectionClosed(self.socket, shard_id=self.shard_id, code=code) from None
+discord.errors.ConnectionClosed: Shard ID None WebSocket closed with 4004
+2025-10-31 13:23:55,034:INFO:discord: ⏹️ 熱重載監控已停止。
+2025-10-31 13:23:55,034:INFO:discord: 🔚 機器人已關閉
