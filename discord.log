@@ -1,25 +1,11 @@
-2025-10-31 13:18:35,011:INFO:discord: 已載入 conversation cog
-2025-10-31 13:18:35,027:INFO:discord: 已載入 music cog
-2025-10-31 13:18:35,029:INFO:discord: 🔥 熱重載功能已啟動，監控 .py 文件變更...
-2025-10-31 13:18:35,029:INFO:discord: 🚀 正在啟動機器人...
-2025-10-31 13:18:35,029:INFO:discord.client: logging in using static token
-2025-10-31 13:18:36,553:INFO:discord.gateway: Shard ID None has connected to Gateway (Session ID: 1c235e4b662a7041c78ef13c10bc1bae).
-2025-10-31 13:18:42,284:INFO:discord: 機器人已登入為: 島田 愛里壽
-2025-10-31 13:18:42,284:INFO:discord: 機器人 ID: 680250721744191488
-2025-10-31 13:18:42,284:INFO:discord: Discord.py 版本: 2.5.2
-2025-10-31 13:18:42,284:INFO:discord: 當前配置摘要: {'prefix': '!', 'token_set': True, 'gemini_key_set': True, 'openai_key_set': True, 'anthropic_key_set': True, 'log_level': 'INFO', 'max_history': 100, 'performance_logging': True, 'gemini_model': 'gemini-2.0-flash', 'openai_model': 'gpt-3.5-turbo', 'anthropic_model': 'claude-3-sonnet-20240229'}
-2025-10-31 13:18:42,284:INFO:discord: 機器人已準備就緒!
-2025-10-31 13:23:49,377:INFO:discord.gateway: Shard ID None session has been invalidated.
-2025-10-31 13:23:55,030:ERROR:discord: ❌ 啟動機器人時出錯: Shard ID None WebSocket closed with 4004
-Traceback (most recent call last):
-  File "C:\Users\harekaze\Documents\GitHub\DISCORD-BOT\main.py", line 428, in main
-    await bot.start(config.TOKEN)
-  File "C:\Users\harekaze\anaconda3\envs\discord\Lib\site-packages\discord\client.py", line 824, in start
-    await self.connect(reconnect=reconnect)
-  File "C:\Users\harekaze\anaconda3\envs\discord\Lib\site-packages\discord\client.py", line 704, in connect
-    await self.ws.poll_event()
-  File "C:\Users\harekaze\anaconda3\envs\discord\Lib\site-packages\discord\gateway.py", line 650, in poll_event
-    raise ConnectionClosed(self.socket, shard_id=self.shard_id, code=code) from None
-discord.errors.ConnectionClosed: Shard ID None WebSocket closed with 4004
-2025-10-31 13:23:55,034:INFO:discord: ⏹️ 熱重載監控已停止。
-2025-10-31 13:23:55,034:INFO:discord: 🔚 機器人已關閉
+2025-10-31 13:36:30,401:INFO:discord: 已載入 conversation cog
+2025-10-31 13:36:30,412:INFO:discord: 已載入 music cog
+2025-10-31 13:36:30,413:INFO:discord: 🔥 熱重載功能已啟動，監控 .py 文件變更...
+2025-10-31 13:36:30,413:INFO:discord: 🚀 正在啟動機器人...
+2025-10-31 13:36:30,414:INFO:discord.client: logging in using static token
+2025-10-31 13:36:31,919:INFO:discord.gateway: Shard ID None has connected to Gateway (Session ID: 485f8db97f0396a38a4f80d2d46e61f6).
+2025-10-31 13:36:37,625:INFO:discord: 機器人已登入為: 島田 愛里壽
+2025-10-31 13:36:37,625:INFO:discord: 機器人 ID: 680250721744191488
+2025-10-31 13:36:37,625:INFO:discord: Discord.py 版本: 2.5.2
+2025-10-31 13:36:37,626:INFO:discord: 當前配置摘要: {'prefix': '!', 'token_set': True, 'gemini_key_set': True, 'openai_key_set': True, 'anthropic_key_set': True, 'log_level': 'INFO', 'max_history': 100, 'performance_logging': True, 'gemini_model': 'gemini-2.0-flash', 'openai_model': 'gpt-3.5-turbo', 'anthropic_model': 'claude-3-sonnet-20240229'}
+2025-10-31 13:36:37,626:INFO:discord: 機器人已準備就緒!
