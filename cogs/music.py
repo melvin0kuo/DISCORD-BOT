@@ -432,11 +432,9 @@ class EnhancedMusic(commands.Cog):
             try:
                 node = wavelink.Node(
                     uri="https://lava-all.ajieblogs.eu.org:443",
-                    password="https://dsc.gg/ajidevserver",
-                    identifier="music_node"
+                    password="https://dsc.gg/ajidevserver"
                 )
-                
-                await wavelink.Pool.connect(client=self.bot, nodes=[node])
+                await wavelink.Pool.connect(nodes=[node], client=self.bot)
                 logger.info("Wavelink 節點已連接")
                 
             except Exception as e:
@@ -459,8 +457,16 @@ class EnhancedMusic(commands.Cog):
         # 如果是佇列循環模式，將當前歌曲重新加入佇列
         if queue.loop_mode == "queue" and payload.track:
             queue.add(payload.track)
-        
+
+        if payload.reason != "FINISHED":
+            return
+
         # 獲取下一首歌曲
+        # 檢查佇列是否為空，如果為空且啟用自動播放，則添加推薦歌曲
+        if not queue.queue and self.autoplay_enabled.get(guild_id, False):
+            await self.auto_recommend_and_play(player)
+
+        # 再次獲取下一首歌曲（可能已被自動播放填充）
         next_track = queue.get_next()
         
         if next_track:
@@ -473,12 +479,9 @@ class EnhancedMusic(commands.Cog):
                     await player.last_channel.send(embed=embed, view=view)
                 except:
                     pass
-        elif self.autoplay_enabled.get(guild_id, False):
-            # 自動播放功能
-            await self.auto_recommend_and_play(player)
 
     async def auto_recommend_and_play(self, player: wavelink.Player):
-        """自動推薦並播放音樂"""
+        """自動推薦並將音樂加入佇列"""
         try:
             guild_id = player.guild.id
             queue = self.get_queue(guild_id)
@@ -486,7 +489,6 @@ class EnhancedMusic(commands.Cog):
             # 基於歷史記錄推薦
             if queue.history:
                 last_track = queue.history[-1]
-                # 搜索相似的音樂
                 search_terms = [
                     f"{last_track.author} music",
                     f"similar to {last_track.title}",
@@ -497,12 +499,10 @@ class EnhancedMusic(commands.Cog):
                     try:
                         tracks = await wavelink.Playable.search(term)
                         if tracks:
-                            # 過濾掉已經播放過的歌曲
                             new_tracks = [t for t in tracks[:5] if t.title not in [h.title for h in queue.history[-10:]]]
                             if new_tracks:
                                 selected_track = random.choice(new_tracks)
-                                await player.play(selected_track)
-                                queue.history.append(selected_track)
+                                queue.add(selected_track) # 將推薦歌曲加入佇列
                                 
                                 if hasattr(player, 'last_channel'):
                                     embed = discord.Embed(
@@ -522,8 +522,7 @@ class EnhancedMusic(commands.Cog):
             
             if tracks:
                 selected_track = random.choice(tracks[:10])
-                await player.play(selected_track)
-                queue.history.append(selected_track)
+                queue.add(selected_track) # 將推薦歌曲加入佇列
                 
                 if hasattr(player, 'last_channel'):
                     embed = discord.Embed(
@@ -550,7 +549,7 @@ class EnhancedMusic(commands.Cog):
             await ctx.send(f"✅ 已移動到語音頻道：{channel.name}")
         else:
             try:
-                player: wavelink.Player = await channel.connect(cls=wavelink.Player)
+                player: wavelink.Player = await channel.connect(cls=wavelink.Player, self_deaf=True)
                 player.last_channel = ctx.channel
                 await ctx.send(f"✅ 已加入語音頻道：{channel.name}")
             except Exception as e:
@@ -559,6 +558,7 @@ class EnhancedMusic(commands.Cog):
     @commands.hybrid_command()
     async def play(self, ctx, *, search: str):
         """播放音樂"""
+        await ctx.defer()
         if not wavelink.Pool.nodes:
             await ctx.send("❌ 音樂服務暫時不可用，請稍後再試。")
             return
@@ -569,7 +569,7 @@ class EnhancedMusic(commands.Cog):
 
         if not ctx.voice_client:
             try:
-                player: wavelink.Player = await ctx.author.voice.channel.connect(cls=wavelink.Player)
+                player: wavelink.Player = await ctx.author.voice.channel.connect(cls=wavelink.Player, self_deaf=True)
                 player.last_channel = ctx.channel
             except Exception as e:
                 await ctx.send(f"❌ 無法連接到語音頻道: {e}")
@@ -611,12 +611,12 @@ class EnhancedMusic(commands.Cog):
                         queue = self.music_cog.get_queue(self.ctx.guild.id)
                         if player.current:
                             queue.add(track)
-                            await interaction.response.send_message(f"✅ 已加入佇列: **{track.title}**", ephemeral=True)
+                            await interaction.response.send_message(f"✅ 已加入佇列: **{track.title}**")
                         else:
                             await player.play(track)
                             embed = self.music_cog.create_now_playing_embed(player, self.ctx.guild.id)
                             view = MusicControlView(player, self.music_cog)
-                            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+                            await interaction.response.send_message(embed=embed, view=view)
 
                 class SearchResultView(discord.ui.View):
                     def __init__(self, tracks, music_cog, ctx):
@@ -660,9 +660,6 @@ class EnhancedMusic(commands.Cog):
                 await ctx.send(embed=embed, view=view)
 
         except Exception as e:
-            # Lavalink v4: KeyError: 'timestamp' hotfix
-            if hasattr(e, "args") and e.args and isinstance(e.args[0], dict) and "timestamp" not in e.args[0]:
-                e.args[0]["timestamp"] = 0
             await ctx.send(f"❌ 播放音樂時出錯: {e}")
             logger.error(f"播放音樂時出錯: {e}")
 
