@@ -3,7 +3,15 @@ import aiohttp
 import asyncio
 import logging
 import sqlite3
+from typing import List, Dict, Any, Optional, AsyncGenerator
+import config
+import google.generativeai as genai
 
+# 導入新的用戶資料庫和對話記憶
+from utils.user_database import user_db
+from utils.conversation_memory import conversation_memory
+
+# 保留舊的資料庫初始化以兼容性（如果需要遷移數據）
 DB_PATH = "user_memory.db"
 
 def init_user_memory_db():
@@ -16,9 +24,6 @@ def init_user_memory_db():
     conn.close()
 
 init_user_memory_db()
-from typing import List, Dict, Any, Optional, AsyncGenerator
-import config
-import google.generativeai as genai
 
 # 設定日誌
 logging.basicConfig(level=logging.INFO)
@@ -38,45 +43,172 @@ class LLMHandler:
         self.gemini_client = None
         self._init_gemini_client()
     def set_user_memory(self, user_id: str, memory: str):
-        """設定用戶個人記憶（寫入 SQLite）"""
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            "INSERT OR REPLACE INTO user_memory (user_id, memory) VALUES (?, ?)",
-            (user_id, memory),
-        )
-        conn.commit()
-        conn.close()
+        """設定用戶個人記憶（使用新的用戶資料庫）"""
+        try:
+            # 確保用戶存在於資料庫中
+            # 由於這裡沒有用戶的詳細資訊，先用 user_id 作為 username
+            user_db.add_or_update_user(
+                user_id=user_id,
+                username=f"user_{user_id}",
+                display_name=f"User {user_id}"
+            )
+            
+            # 設置記憶
+            success = user_db.set_user_data(
+                user_id=user_id,
+                data_key="personal_memory",
+                data_value=memory,
+                data_type="text"
+            )
+            
+            if success:
+                # 記錄互動
+                user_db.log_interaction(
+                    user_id=user_id,
+                    interaction_type="memory_set_via_command",
+                    content=memory[:100] + "..." if len(memory) > 100 else memory
+                )
+                logger.info(f"用戶 {user_id} 記憶設置成功")
+            else:
+                logger.error(f"用戶 {user_id} 記憶設置失敗")
+                
+        except Exception as e:
+            logger.error(f"設置用戶記憶時出錯: {e}")
+            # 如果新系統失敗，回退到舊系統
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute(
+                    "INSERT OR REPLACE INTO user_memory (user_id, memory) VALUES (?, ?)",
+                    (user_id, memory),
+                )
+                conn.commit()
+                conn.close()
+                logger.info(f"使用舊系統為用戶 {user_id} 設置記憶")
+            except Exception as fallback_e:
+                logger.error(f"舊系統也設置失敗: {fallback_e}")
 
     def get_user_memory(self, user_id: str) -> str:
-        """取得用戶個人記憶（查詢 SQLite）"""
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT memory FROM user_memory WHERE user_id = ?", (user_id,))
-        row = c.fetchone()
-        conn.close()
-        return row[0] if row else ""
-        # 用戶個人記憶資料
-        self.user_memory: Dict[str, str] = {}
+        """取得用戶個人記憶（優先使用新的用戶資料庫）"""
+        try:
+            # 先嘗試從新資料庫獲取
+            memory = user_db.get_user_data(user_id, "personal_memory")
+            if memory:
+                return memory
+            
+            # 如果新資料庫沒有，嘗試從舊資料庫遷移
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT memory FROM user_memory WHERE user_id = ?", (user_id,))
+            row = c.fetchone()
+            conn.close()
+            
+            if row and row[0]:
+                old_memory = row[0]
+                # 遷移到新資料庫
+                self.set_user_memory(user_id, old_memory)
+                return old_memory
+                
+            return ""
+            
+        except Exception as e:
+            logger.error(f"獲取用戶記憶時出錯: {e}")
+            # 回退到舊系統
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute("SELECT memory FROM user_memory WHERE user_id = ?", (user_id,))
+                row = c.fetchone()
+                conn.close()
+                return row[0] if row else ""
+            except Exception as fallback_e:
+                logger.error(f"舊系統也獲取失敗: {fallback_e}")
+                return ""
 
-        # 初始化 Gemini 客戶端
-        self._init_gemini_client()
+    def get_user_full_context(self, user_id: str, channel_id: str = None) -> str:
+        """獲取用戶的完整上下文（記憶 + 標籤 + 重要資料 + 對話歷史）"""
+        try:
+            context_parts = []
+            
+            # 獲取用戶基本資訊以便顯示名稱和創建Discord標記
+            user_info = user_db.get_user_info(user_id)
+            user_display_name = "此用戶"
+            user_mention = f"<@{user_id}>"  # Discord用戶標記格式
+            
+            if user_info:
+                user_display_name = user_info.get('display_name') or user_info.get('username', '此用戶')
+            
+            # 獲取個人記憶
+            memory = self.get_user_memory(user_id)
+            if memory:
+                context_parts.append(f"【{user_display_name}({user_mention})的個人記憶】{memory}")
+            
+            # 獲取用戶標籤
+            tags = user_db.get_user_tags(user_id)
+            if tags:
+                tag_list = []
+                for tag in tags[:15]:  # 增加標籤數量限制
+                    if tag['value']:
+                        tag_list.append(f"{tag['name']}: {tag['value']}")
+                    else:
+                        tag_list.append(tag['name'])
+                if tag_list:
+                    context_parts.append(f"【{user_display_name}({user_mention})的標籤】{', '.join(tag_list)}")
+            
+            # 獲取所有用戶資料（不再限制特定關鍵字，讓LLM理解所有內容）
+            try:
+                all_user_data = user_db.get_all_user_data(user_id)
+                if all_user_data:
+                    data_list = []
+                    for data_entry in all_user_data[:20]:  # 限制數量避免過長
+                        key = data_entry['data_key']
+                        value = data_entry['data_value']
+                        if value and key != 'personal_memory':  # 排除記憶（已單獨處理）
+                            # 讓LLM自動理解各種格式的資料
+                            data_list.append(f"{key}: {value}")
+                    if data_list:
+                        context_parts.append(f"【{user_display_name}({user_mention})的個人資料】{', '.join(data_list)}")
+            except Exception as data_error:
+                logger.warning(f"獲取用戶資料時出錯: {data_error}")
+            
+            # 獲取對話上下文（如果提供了頻道ID）
+            if channel_id:
+                conversation_context = conversation_memory.get_conversation_context(user_id, channel_id, 5)
+                if conversation_context:
+                    context_parts.append(f"【{user_display_name}({user_mention})的最近對話】{conversation_context}")
+            
+            # 獲取對話洞察
+            if channel_id:
+                insights = conversation_memory.get_conversation_insights(user_id, channel_id)
+                if insights.get('common_topics'):
+                    context_parts.append(f"【{user_display_name}({user_mention})常討論的話題】{', '.join(insights['common_topics'][:8])}")
+                if insights.get('latest_interests'):
+                    context_parts.append(f"【{user_display_name}({user_mention})的最新興趣】{', '.join(insights['latest_interests'][:5])}")
+            
+            return "\n".join(context_parts) if context_parts else ""
+            
+        except Exception as e:
+            logger.error(f"獲取用戶完整上下文時出錯: {e}")
+            return ""
     
     async def retrieve_context_from_vector_db(self, user_id: str, channel_id: str, text: str, vector_db, top_k=3) -> str:
         """
         取得與當前訊息最相關的前後文（向量資料庫檢索）
         """
-        embedding = await self.get_gemini_embedding(text)
-        if embedding is None:
+        try:
+            embedding = await self.get_gemini_embedding(text)
+            if embedding is None:
+                logger.warning("無法取得 embedding，跳過向量資料庫檢索")
+                return ""
+            import numpy as np
+            results = vector_db.search(user_id, channel_id, np.array(embedding), top_k=top_k)
+            if not results:
+                return ""
+            context = "\n".join([f"【相關內容{i+1}】{item['text']}" for i, item in enumerate(results)])
+            return context
+        except Exception as e:
+            logger.warning(f"向量資料庫檢索失敗，跳過檢索: {e}")
             return ""
-        import numpy as np
-        results = vector_db.search(user_id, channel_id, np.array(embedding), top_k=top_k)
-        if not results:
-            return ""
-        context = "\n".join([f"【相關內容{i+1}】{item['text']}" for i, item in enumerate(results)])
-        return context
     async def build_gemini_parts(self, text: str, attachments: list) -> list:
         """
         將文字與 Discord 附件轉為 Gemini 多模態 API 的 parts 格式
@@ -159,6 +291,23 @@ class LLMHandler:
             # 將完整回應添加到歷史記錄
             if collected_response:
                 self.add_to_history(user_id, channel_id, "assistant", collected_response)
+                
+                # 添加到對話記憶系統
+                if isinstance(parts_or_message, str):
+                    user_message = parts_or_message
+                elif isinstance(parts_or_message, list) and parts_or_message:
+                    user_message = next((p.get("text") for p in parts_or_message if "text" in p), "")
+                else:
+                    user_message = ""
+                
+                if user_message:
+                    conversation_memory.add_conversation_turn(
+                        user_id=user_id,
+                        channel_id=channel_id,
+                        user_message=user_message,
+                        ai_response=collected_response,
+                        context={"stream_response": True}
+                    )
         except Exception as e:
             logger.error(f"串流回應時出錯: {e}")
             yield f"❌ 回應串流錯誤: {str(e)}"
@@ -177,6 +326,15 @@ class LLMHandler:
             # 添加助手回應到歷史記錄
             self.add_to_history(user_id, channel_id, "assistant", response)
             
+            # 添加到對話記憶系統
+            conversation_memory.add_conversation_turn(
+                user_id=user_id,
+                channel_id=channel_id,
+                user_message=message,
+                ai_response=response,
+                context={"non_stream_response": True}
+            )
+            
             return response
             
         except Exception as e:
@@ -189,11 +347,11 @@ class LLMHandler:
             # 獲取對話歷史
             history = self._get_user_history(user_id, channel_id)
 
-            # 插入用戶個人記憶
-            user_memory = self.get_user_memory(user_id)
+            # 插入用戶完整上下文（記憶 + 標籤 + 資料 + 對話歷史）
+            user_context = self.get_user_full_context(user_id, channel_id)
             system_instruction = self.system_prompt
-            if user_memory:
-                system_instruction += f"\n[用戶個人記憶]: {user_memory}"
+            if user_context:
+                system_instruction += f"\n\n[用戶個人資訊和上下文]:\n{user_context}\n\n請根據用戶的個人資訊、記憶、標籤和對話歷史，提供個人化和相關的回應。所有資料都以文字格式儲存，請智慧地理解其含義和內容。\n\n重要：當提及用戶時，請使用Discord標記格式 <@用戶ID>，例如 <@597028717948043274>，這樣可以在Discord中正確標記用戶。不要只使用用戶名稱，而要使用完整的標記格式。"
 
             # 初始化 Gemini 模型
             model = self.gemini_client.GenerativeModel(
@@ -250,11 +408,11 @@ class LLMHandler:
             # 獲取對話歷史
             history = self._get_user_history(user_id, channel_id)
 
-            # 插入用戶個人記憶
-            user_memory = self.get_user_memory(user_id)
+            # 插入用戶完整上下文（記憶 + 標籤 + 資料 + 對話歷史）
+            user_context = self.get_user_full_context(user_id, channel_id)
             system_instruction = self.system_prompt
-            if user_memory:
-                system_instruction += f"\n[用戶個人記憶]: {user_memory}"
+            if user_context:
+                system_instruction += f"\n\n[用戶個人資訊和上下文]:\n{user_context}\n\n請根據用戶的個人資訊、記憶、標籤和對話歷史，提供個人化和相關的回應。所有資料都以文字格式儲存，請智慧地理解其含義和內容。\n\n重要：當提及用戶時，請使用Discord標記格式 <@用戶ID>，例如 <@597028717948043274>，這樣可以在Discord中正確標記用戶。不要只使用用戶名稱，而要使用完整的標記格式。"
 
             # 初始化 Gemini 模型
             model = self.gemini_client.GenerativeModel(
@@ -345,7 +503,11 @@ class LLMHandler:
             )
             return response["embedding"]
         except Exception as e:
-            logger.error(f"取得 Gemini embedding 失敗: {e}")
+            # 如果是配額用完的錯誤，降級為警告而非錯誤
+            if "quota" in str(e).lower() or "429" in str(e):
+                logger.warning(f"Gemini embedding API 配額用完，跳過檢索")
+            else:
+                logger.error(f"取得 Gemini embedding 失敗: {e}")
             return None
 
     async def is_prompt_injection_attack(self, user_message: str) -> bool:

@@ -5,6 +5,7 @@ import asyncio
 import config
 import logging
 from utils.llm_handler import LLMHandler
+from utils.user_database import user_db
 
 logger = logging.getLogger("discord")
 
@@ -16,6 +17,7 @@ class Conversation(commands.Cog):
         self.bot = bot
         self.llm_handler = LLMHandler(bot_name=bot.user.name if bot.user else "助手")
         self.greetings = ["你好", "嗨", "哈囉", "安安", "嘿"]
+        self.processing_messages = set()  # 防止重複處理同一訊息
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -26,9 +28,25 @@ class Conversation(commands.Cog):
     async def on_message(self, message):
         if message.author == self.bot.user:
             return
+        
+        # 記錄所有訊息到日誌
+        channel_name = getattr(message.channel, 'name', 'DM')
+        channel_id = message.channel.id
+        logger.info(
+            f"[訊息記錄] 用戶: {message.author.display_name}({message.author.id}) | "
+            f"頻道: {channel_name}({channel_id}) | "
+            f"內容: {message.content}"
+        )
+        
         if message.content.startswith(config.PREFIX):
             return
 
+        # 防止重複處理同一訊息
+        message_key = f"{message.id}_{message.author.id}"
+        if message_key in self.processing_messages:
+            logger.warning(f"訊息 {message.id} 已在處理中，跳過重複處理")
+            return
+        
         is_dm = isinstance(message.channel, discord.DMChannel)
         is_mentioned = self.bot.user in message.mentions
         is_reply_to_bot = (
@@ -37,15 +55,16 @@ class Conversation(commands.Cog):
             message.reference.cached_message and
             message.reference.cached_message.author == self.bot.user
         )
-        logger.info(
-            f"[互動觸發] 用戶: {message.author}({message.author.id}) | "
-            f"頻道: {getattr(message.channel, 'name', 'DM')}({message.channel.id}) | "
-            f"私訊: {is_dm} | 提及: {is_mentioned} | 回覆: {is_reply_to_bot} | 內容: {message.content}"
-        )
-
+        
         # 滾動輸入：允許同時多訊息進入佇列，不等待 AI 回應
         if is_dm or is_mentioned or is_reply_to_bot:
-            self.bot.loop.create_task(self.handle_conversation(message, is_dm, is_mentioned, is_reply_to_bot))
+            self.processing_messages.add(message_key)
+            logger.info(
+                f"[互動觸發] 用戶: {message.author}({message.author.id}) | "
+                f"頻道: {channel_name}({channel_id}) | "
+                f"私訊: {is_dm} | 提及: {is_mentioned} | 回覆: {is_reply_to_bot} | 內容: {message.content}"
+            )
+            self.bot.loop.create_task(self.handle_conversation(message, is_dm, is_mentioned, is_reply_to_bot, message_key))
 
     async def _is_prompt_injection(self, msg: str) -> bool:
         """
@@ -55,7 +74,7 @@ class Conversation(commands.Cog):
             return False
         return await self.llm_handler.is_prompt_injection_attack(msg)
 
-    async def handle_conversation(self, message, is_dm=False, is_mentioned=False, is_reply_to_bot=False):
+    async def handle_conversation(self, message, is_dm=False, is_mentioned=False, is_reply_to_bot=False, message_key=None):
         try:
             content = message.content
             if is_mentioned:
@@ -71,35 +90,90 @@ class Conversation(commands.Cog):
                 await message.channel.send(f"{random.choice(self.greetings)}，有什麼我能幫你的嗎？")
                 return
             logger.info(f"用戶 {message.author.name} ({message.author.id}) 的訊息: {content}")
-
-            # 偵測訊息中是否有提及其他用戶
-            mentioned_memories = []
-            for user in message.mentions:
-                if user.id != self.bot.user.id:
-                    mem = self.llm_handler.get_user_memory(str(user.id))
-                    if mem:
-                        mentioned_memories.append(f"【{user.display_name} 的個人記憶】{mem}")
+            
+            # 確保用戶在新資料庫中存在
+            user_db.add_or_update_user(
+                user_id=str(message.author.id),
+                username=message.author.name,
+                display_name=message.author.display_name
+            )
+            
+            # 記錄用戶互動
+            user_db.log_interaction(
+                user_id=str(message.author.id),
+                interaction_type="message",
+                content=content[:200] + "..." if len(content) > 200 else content,
+                metadata={
+                    "channel_id": str(message.channel.id),
+                    "guild_id": str(message.guild.id) if message.guild else None,
+                    "is_dm": is_dm,
+                    "is_mentioned": is_mentioned,
+                    "is_reply": is_reply_to_bot
+                }
+            )
 
             async with message.channel.typing():
                 try:
                     channel_id = str(message.author.id) if is_dm else str(message.channel.id)
+                    logger.info(f"開始處理對話 - 用戶: {message.author.id}, 頻道: {channel_id}")
+                    
+                    # 偵測訊息中是否有提及其他用戶，獲取他們的完整上下文
+                    mentioned_contexts = []
+                    for user in message.mentions:
+                        if user.id != self.bot.user.id:
+                            # 確保被提及的用戶也在資料庫中
+                            user_db.add_or_update_user(
+                                user_id=str(user.id),
+                                username=user.name,
+                                display_name=user.display_name
+                            )
+                            
+                            # 獲取完整上下文
+                            user_context = self.llm_handler.get_user_full_context(str(user.id), channel_id)
+                            if user_context:
+                                mentioned_contexts.append(f"【{user.display_name} 的資訊】{user_context}")
+                    
                     # 先送出一則訊息，後續用 edit 更新
                     sent_message = await message.channel.send("💬 思考中...")
                     response_text = ""
+                    
+                    # 獲取發送訊息用戶的完整上下文（個人資料、標籤、記憶等）
+                    logger.info("正在獲取用戶完整上下文...")
+                    user_context = self.llm_handler.get_user_full_context(str(message.author.id), channel_id)
+                    logger.info(f"用戶上下文獲取完成，長度: {len(user_context) if user_context else 0}")
+                    
                     # 多模態：傳入文字與附件
                     # 先從向量資料庫取得相關前後文
-                    context = await self.llm_handler.retrieve_context_from_vector_db(
+                    logger.info("正在檢索向量資料庫...")
+                    vector_context = await self.llm_handler.retrieve_context_from_vector_db(
                         str(message.author.id), channel_id, content, self.vector_db, top_k=3
                     )
+                    logger.info(f"向量資料庫檢索完成，context: {bool(vector_context)}")
+                    
                     parts = await self.llm_handler.build_gemini_parts(content, message.attachments)
-                    # 將檢索到的 context 與被提及用戶記憶插入 parts 最前面
-                    if context or mentioned_memories:
-                        context_block = ""
-                        if context:
-                            context_block += f"【前後文補充】\n{context}\n"
-                        if mentioned_memories:
-                            context_block += "\n".join(mentioned_memories)
-                        parts.insert(0, {"text": context_block})
+                    
+                    # 組合所有上下文資訊
+                    context_blocks = []
+                    
+                    # 1. 用戶個人上下文（最重要，放在最前面）
+                    if user_context:
+                        context_blocks.append(f"【用戶 {message.author.display_name} 的個人資訊】\n{user_context}")
+                    
+                    # 2. 向量資料庫相關上下文
+                    if vector_context:
+                        context_blocks.append(f"【相關歷史對話】\n{vector_context}")
+                    
+                    # 3. 被提及用戶的上下文
+                    if mentioned_contexts:
+                        context_blocks.extend(mentioned_contexts)
+                    
+                    # 將所有上下文插入到 parts 最前面
+                    if context_blocks:
+                        full_context = "\n\n".join(context_blocks)
+                        parts.insert(0, {"text": full_context})
+                        logger.info(f"已添加完整上下文，總長度: {len(full_context)}")
+                    
+                    logger.info("開始生成 LLM 回應...")
                     async for chunk in self.llm_handler.get_llm_response_stream(str(message.author.id), channel_id, parts):
                         if chunk:
                             response_text += chunk
@@ -109,6 +183,9 @@ class Conversation(commands.Cog):
                                     await sent_message.edit(content=response_text)
                                 except Exception:
                                     pass
+                    
+                    logger.info(f"LLM 回應生成完成，長度: {len(response_text)}")
+                    
                     # 最後再編輯一次完整內容
                     # 嘗試自動偵測 Gemini 回應中的 base64 圖片或檔案
                     import re, base64, io
@@ -124,14 +201,34 @@ class Conversation(commands.Cog):
                         await message.channel.send("Gemini 回傳檔案：", file=file)
                     if response_text:
                         await sent_message.edit(content=response_text)
+                        logger.info("對話處理完成，已發送回應")
+                        
+                        # 記錄 AI 回應
+                        user_db.log_interaction(
+                            user_id=str(message.author.id),
+                            interaction_type="ai_response",
+                            content=response_text[:200] + "..." if len(response_text) > 200 else response_text,
+                            metadata={
+                                "channel_id": str(message.channel.id),
+                                "response_length": len(response_text)
+                            }
+                        )
                     else:
                         await sent_message.edit(content="❌ 抱歉，我無法生成回應。請稍後再試。")
+                        logger.warning("對話處理完成，但沒有生成回應")
                 except Exception as e:
                     logger.error(f"生成回應時出錯: {e}", exc_info=True)
-                    await message.channel.send(f"抱歉，生成回應時出現錯誤: {str(e)}")
+                    try:
+                        await message.channel.send(f"抱歉，生成回應時出現錯誤: {str(e)}")
+                    except:
+                        logger.error("無法發送錯誤訊息")
         except Exception as e:
             logger.error(f"處理對話時出錯: {e}", exc_info=True)
             await message.channel.send(f"❌ 處理訊息時出錯: {str(e)}")
+        finally:
+            # 處理完成後移除訊息標記
+            if message_key and message_key in self.processing_messages:
+                self.processing_messages.remove(message_key)
 
     async def _send_typing_effect(self, channel, text, user=None, is_dm=False):
         if len(text) > 1500:
@@ -183,12 +280,68 @@ class Conversation(commands.Cog):
             await ctx.send(rejection_response)
             return
             
+        # 確保用戶在資料庫中存在
+        user_db.add_or_update_user(
+            user_id=str(ctx.author.id),
+            username=ctx.author.name,
+            display_name=ctx.author.display_name
+        )
+        
+        # 記錄用戶互動
+        user_db.log_interaction(
+            user_id=str(ctx.author.id),
+            interaction_type="chat_command",
+            content=message[:200] + "..." if len(message) > 200 else message,
+            metadata={
+                "channel_id": str(ctx.channel.id),
+                "guild_id": str(ctx.guild.id) if ctx.guild else None
+            }
+        )
+            
         async with ctx.typing():
             try:
                 channel_id = str(ctx.author.id) if isinstance(ctx.channel, discord.DMChannel) else str(ctx.channel.id)
-                response = await self.llm_handler.get_llm_response(str(ctx.author.id), channel_id, message)
-                is_dm = isinstance(ctx.channel, discord.DMChannel)
-                await self.send_long_message(ctx.channel, response, ctx.author, is_dm)
+                
+                # 獲取用戶完整上下文並使用增強的 LLM 回應方法
+                user_context = self.llm_handler.get_user_full_context(str(ctx.author.id), channel_id)
+                
+                # 構建包含上下文的 parts
+                parts = [{"text": message}]
+                if user_context:
+                    parts.insert(0, {"text": f"【用戶 {ctx.author.display_name} 的個人資訊】\n{user_context}"})
+                
+                # 使用流式回應
+                response_text = ""
+                sent_message = await ctx.send("💬 思考中...")
+                
+                async for chunk in self.llm_handler.get_llm_response_stream(str(ctx.author.id), channel_id, parts):
+                    if chunk:
+                        response_text += chunk
+                        # 避免太頻繁編輯
+                        if len(response_text) < 50 or len(response_text) % 20 == 0:
+                            try:
+                                await sent_message.edit(content=response_text)
+                            except Exception:
+                                pass
+                
+                # 最終編輯完整回應
+                if response_text:
+                    await sent_message.edit(content=response_text)
+                    
+                    # 記錄 AI 回應
+                    user_db.log_interaction(
+                        user_id=str(ctx.author.id),
+                        interaction_type="ai_response",
+                        content=response_text[:200] + "..." if len(response_text) > 200 else response_text,
+                        metadata={
+                            "channel_id": str(ctx.channel.id),
+                            "command_triggered": True,
+                            "response_length": len(response_text)
+                        }
+                    )
+                else:
+                    await sent_message.edit(content="❌ 抱歉，我無法生成回應。請稍後再試。")
+                
             except Exception as e:
                 logger.error(f"聊天命令出錯: {e}", exc_info=True)
                 await ctx.send(f"抱歉，生成回應時出現錯誤: {str(e)}")
@@ -201,6 +354,14 @@ class Conversation(commands.Cog):
 
     @commands.command(name="set_memory", help="設定您的個人記憶（如：!set_memory 我喜歡貓）")
     async def set_memory(self, ctx, *, memory: str):
+        # 確保用戶在資料庫中存在
+        user_db.add_or_update_user(
+            user_id=str(ctx.author.id),
+            username=ctx.author.name,
+            display_name=ctx.author.display_name
+        )
+        
+        # 使用新系統設置記憶
         self.llm_handler.set_user_memory(str(ctx.author.id), memory)
         await ctx.send(f"已為您設定個人記憶：{memory}")
 

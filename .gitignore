@@ -1,6 +1,37 @@
-models/
+## 環境 & 機密
 .env
-LOCAL_MODEL_USE_FLASH_ATTN/
-/llama-cpp-python
+*.env.*
+
+## Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+## 資料庫 & 日誌
+*.db
 *.log
 discord.log
+bot_log.txt
+
+## 模型 & 本地端套件
+models/
+LOCAL_MODEL_USE_FLASH_ATTN/
+/llama-cpp-python
+
+## 自動生成 / 快取
+data/lavalink_servers.json
+data/autoplay_config.json
+
+## Lavalink 備份 jar
+Lavalink/*_backup.jar
+
+## Claude Code 內部檔案
+.claude/
+
+## 版本號偽目錄（pip 殘留）
+3.*
+4.*
+
+## 測試 & 暫存
+test_*.py

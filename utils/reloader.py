@@ -1,3 +1,4 @@
+import discord
 import asyncio
 import logging
 from watchdog.observers import Observer

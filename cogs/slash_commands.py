@@ -1,253 +1,574 @@
-import discord
-from discord import app_commands
-from discord.ext import commands
-import logging
-import os
-import sys
-import random
-import asyncio
-from typing import Optional, List
+"""
+斜線指令 Cog - 專門處理斜線指令
+包含 Lavalink 伺服器管理和其他實用功能
+"""
 
-# 設置日誌
-logger = logging.getLogger('discord')
+import discord
+from discord.ext import commands
+from discord import app_commands
+import wavelink
+import logging
+
+logger = logging.getLogger(__name__)
 
 class SlashCommands(commands.Cog):
+    """斜線指令處理"""
+    
     def __init__(self, bot):
         self.bot = bot
         
-    @commands.Cog.listener()
-    async def on_ready(self):
-        logger.info("斜線指令 cog 已準備就緒")
-        
-        # 確保斜線指令已同步
-        if not self.bot.synced:
-            await self.bot.tree.sync()
-            logger.info("斜線指令已同步")
-            self.bot.synced = True
-
-    # 基本指令
-    @app_commands.command(name="ping", description="檢查機器人延遲")
-    async def ping(self, interaction: discord.Interaction):
-        """檢查機器人延遲"""
-        latency = round(self.bot.latency * 1000)
-        await interaction.response.send_message(f"🏓 Pong! 延遲: {latency}ms")
-    
-    @app_commands.command(name="roll", description="擲骰子")
-    @app_commands.describe(sides="骰子的面數", count="骰子數量")
-    async def roll(self, interaction: discord.Interaction, sides: int = 6, count: int = 1):
-        """擲骰子"""
-        if sides < 1 or count < 1 or count > 10:
-            await interaction.response.send_message("❌ 面數必須大於0，且骰子數量必須在1-10之間", ephemeral=True)
-            return
+    @commands.hybrid_command(name="switch_lavalink", description="切換到另一個 Lavalink 伺服器")
+    @app_commands.describe(force="是否強制切換（即使當前連接正常）")
+    async def switch_lavalink(self, ctx: commands.Context, force: bool = False):
+        """切換 Lavalink 伺服器（支援斜線指令和 prefix 指令）"""
+        # 安全的交互類型處理
+        try:
+            if hasattr(ctx, 'interaction') and ctx.interaction is not None:
+                await ctx.defer()
             
-        results = [random.randint(1, sides) for _ in range(count)]
-        total = sum(results)
+            # 統一使用 ctx.send，它會自動處理斜線指令和 prefix 指令
+            send_func = ctx.send
+        except Exception as e:
+            logger.error(f"處理交互類型時出錯: {e}")
+            send_func = ctx.send
         
+        try:
+            # 獲取音樂 cog
+            music_cog = self.bot.get_cog('EnhancedMusic')
+            if not music_cog:
+                await send_func("❌ 音樂模組未載入")
+                return
+            
+            # 檢查當前連接狀態
+            current_status = "無連接"
+            if wavelink.Pool.nodes:
+                for node in wavelink.Pool.nodes.values():
+                    if node.status.name == "CONNECTED":
+                        current_status = f"已連接到 {node.identifier}"
+                        break
+            
+            # 如果當前連接正常且不強制切換
+            if not force and "已連接" in current_status:
+                embed = discord.Embed(
+                    title="🔗 Lavalink 伺服器狀態",
+                    description=f"目前狀態: {current_status}",
+                    color=discord.Color.green()
+                )
+                embed.add_field(
+                    name="💡 提示",
+                    value="如果要強制切換伺服器，請使用 `force=True` 參數",
+                    inline=False
+                )
+                await send_func(embed=embed)
+                return
+            
+            # 嘗試切換伺服器
+            embed = discord.Embed(
+                title="🔄 正在切換 Lavalink 伺服器",
+                description="請稍候...",
+                color=discord.Color.orange()
+            )
+            msg = await send_func(embed=embed)
+            
+            success = await music_cog.switch_lavalink_server()
+            
+            if success:
+                # 獲取新的連接狀態
+                new_status = "未知"
+                if wavelink.Pool.nodes:
+                    for node in wavelink.Pool.nodes.values():
+                        if node.status.name == "CONNECTED":
+                            new_status = node.identifier
+                            break
+                
+                embed = discord.Embed(
+                    title="✅ 伺服器切換成功",
+                    description=f"已切換到: **{new_status}**",
+                    color=discord.Color.green()
+                )
+                embed.add_field(
+                    name="📊 狀態",
+                    value=f"舊連接: {current_status}\n新連接: {new_status}",
+                    inline=False
+                )
+            else:
+                embed = discord.Embed(
+                    title="❌ 伺服器切換失敗",
+                    description="無法找到可用的替代伺服器",
+                    color=discord.Color.red()
+                )
+                embed.add_field(
+                    name="💡 建議",
+                    value="• 檢查網路連接\n• 稍後再試\n• 使用指令查看伺服器狀態",
+                    inline=False
+                )
+            
+            # 統一發送回應
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            logger.error(f"切換伺服器失敗: {e}")
+            embed = discord.Embed(
+                title="❌ 切換失敗",
+                description=f"發生錯誤: {str(e)}",
+                color=discord.Color.red()
+            )
+            await send_func(embed=embed)
+    
+    @commands.hybrid_command(name="lavalink_status", description="顯示 Lavalink 伺服器狀態")
+    async def lavalink_status(self, ctx: commands.Context):
+        """顯示 Lavalink 狀態（支援斜線指令和 prefix 指令）"""
+        # 安全的交互類型處理
+        try:
+            if hasattr(ctx, 'interaction') and ctx.interaction is not None:
+                await ctx.defer()
+            
+            # 統一使用 ctx.send
+            send_func = ctx.send
+        except Exception as e:
+            logger.error(f"處理交互類型時出錯: {e}")
+            send_func = ctx.send
+        
+        try:
+            # 檢查 Lavalink 管理器
+            try:
+                from utils.lavalink_manager import lavalink_manager
+            except ImportError:
+                lavalink_manager = None
+            
+            embed = discord.Embed(
+                title="🌐 Lavalink 伺服器狀態",
+                color=discord.Color.blue()
+            )
+            
+            # 顯示當前連接狀態
+            current_connections = []
+            if wavelink.Pool.nodes:
+                for node_id, node in wavelink.Pool.nodes.items():
+                    status_emoji = "🟢" if node.status.name == "CONNECTED" else "🔴"
+                    current_connections.append(f"{status_emoji} **{node.identifier}** - {node.status.name}")
+            
+            if current_connections:
+                embed.add_field(
+                    name="🔗 當前連接",
+                    value="\n".join(current_connections),
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="🔗 當前連接",
+                    value="❌ 無連接",
+                    inline=False
+                )
+            
+            # 如果有 Lavalink 管理器，顯示更多資訊
+            if lavalink_manager:
+                try:
+                    status = lavalink_manager.get_server_status_summary()
+                    
+                    # 版本相容性資訊
+                    embed.add_field(
+                        name="🔧 版本相容性",
+                        value=(
+                            f"Wavelink: **{status.get('wavelink_version', '未知')}**\n"
+                            f"偏好 Lavalink: **{status.get('preferred_lavalink_version', '未知')}**\n"
+                            f"相容伺服器: **{status.get('compatible', 0)}/{status.get('total', 0)}** 個"
+                        ),
+                        inline=True
+                    )
+                except Exception as status_error:
+                    logger.error(f"獲取伺服器狀態失敗: {status_error}")
+                    embed.add_field(
+                        name="⚠️ 狀態錯誤",
+                        value="無法獲取詳細狀態資訊",
+                        inline=True
+                    )
+                    # 使用基本狀態
+                    status = {"total": len(lavalink_manager.servers) if hasattr(lavalink_manager, 'servers') else 0}
+                
+                try:
+                    embed.add_field(
+                        name="📊 伺服器統計",
+                        value=(
+                            f"總計: {status.get('total', 0)} 個\n"
+                            f"🟢 線上: {status.get('online', 0)} 個\n"
+                            f"🔴 離線: {status.get('offline', 0)} 個\n"
+                            f"⚠️ 錯誤: {status.get('error', 0)} 個"
+                        ),
+                        inline=True
+                    )
+                    
+                    # 版本分佈統計
+                    version_info = status.get('version_info', {})
+                    embed.add_field(
+                        name="📋 版本分佈",
+                        value=(
+                            f"Lavalink 4.x: {version_info.get('4.x', 0)} 個\n"
+                            f"Lavalink 3.x: {version_info.get('3.x', 0)} 個\n"
+                            f"未知版本: {version_info.get('unknown', 0)} 個"
+                        ),
+                        inline=True
+                    )
+                    
+                    # 顯示最佳相容伺服器
+                    if hasattr(lavalink_manager, 'servers') and lavalink_manager.servers:
+                        try:
+                            compatible_servers = lavalink_manager._get_compatible_servers()
+                            online_compatible = [s for s in compatible_servers if s.status == "online"]
+                            
+                            if online_compatible:
+                                # 使用智能排序
+                                best_servers = sorted(online_compatible, key=lavalink_manager._server_sort_key)[:3]
+                                server_list = []
+                                for i, server in enumerate(best_servers, 1):
+                                    ping = f"{server.response_time*1000:.0f}ms" if server.response_time > 0 else "N/A"
+                                    version_emoji = "🆕" if server.version == "4.x" else "📦" if server.version == "3.x" else "❓"
+                                    server_list.append(f"{i}. {version_emoji} {server.name} - {ping}")
+                                
+                                embed.add_field(
+                                    name="🏆 最佳相容伺服器",
+                                    value="\n".join(server_list),
+                                    inline=False
+                                )
+                            else:
+                                embed.add_field(
+                                    name="⚠️ 相容性警告",
+                                    value=f"沒有線上的相容伺服器！\n建議檢查 Wavelink 版本設定",
+                                    inline=False
+                                )
+                        except Exception as e:
+                            logger.warning(f"獲取相容伺服器清單失敗: {e}")
+                            embed.add_field(
+                                name="📋 伺服器清單",
+                                value=f"共 {len(lavalink_manager.servers)} 個伺服器",
+                                inline=False
+                            )
+                except Exception as e:
+                    logger.warning(f"顯示伺服器統計失敗: {e}")
+            else:
+                embed.add_field(
+                    name="⚠️ 注意",
+                    value="伺服器管理器未啟用",
+                    inline=False
+                )
+            
+            # 添加操作提示
+            embed.add_field(
+                name="🛠️ 可用操作",
+                value="• `/switch_lavalink` - 切換伺服器\n• `/reconnect_lavalink` - 重新連接",
+                inline=False
+            )
+            
+            await send_func(embed=embed)
+            
+        except Exception as e:
+            logger.error(f"獲取 Lavalink 狀態失敗: {e}")
+            embed = discord.Embed(
+                title="❌ 獲取狀態失敗",
+                description=f"發生錯誤: {str(e)}",
+                color=discord.Color.red()
+            )
+            await send_func(embed=embed)
+    
+    @commands.hybrid_command(name="reconnect_lavalink", description="重新連接到最佳 Lavalink 伺服器")
+    @commands.is_owner()
+    async def reconnect_lavalink(self, ctx: commands.Context):
+        """重新連接 Lavalink（支援斜線指令和 prefix 指令，僅限擁有者）"""
+        # 安全的交互類型處理
+        try:
+            if hasattr(ctx, 'interaction') and ctx.interaction is not None:
+                await ctx.defer()
+            
+            # 統一使用 ctx.send
+            send_func = ctx.send
+        except Exception as e:
+            logger.error(f"處理交互類型時出錯: {e}")
+            send_func = ctx.send
+        
+        try:
+            # 獲取音樂 cog
+            music_cog = self.bot.get_cog('EnhancedMusic')
+            if not music_cog:
+                await send_func("❌ 音樂模組未載入")
+                return
+            
+            embed = discord.Embed(
+                title="🔌 正在重新連接 Lavalink",
+                description="正在斷開現有連接並重新連接到最佳伺服器...",
+                color=discord.Color.orange()
+            )
+            msg = await send_func(embed=embed)
+            
+            # 關閉所有現有節點（Pool.nodes 是唯讀 mapping，必須逐一 close）
+            for node in list(wavelink.Pool.nodes.values()):
+                try:
+                    await node.close()
+                except Exception:
+                    pass
+            
+            # 重新連接
+            success = await music_cog.connect_to_lavalink()
+            
+            if success:
+                # 獲取新連接狀態
+                new_status = "未知"
+                if wavelink.Pool.nodes:
+                    for node in wavelink.Pool.nodes.values():
+                        if node.status.name == "CONNECTED":
+                            new_status = node.identifier
+                            break
+                
+                embed = discord.Embed(
+                    title="✅ 重新連接成功",
+                    description=f"已連接到: **{new_status}**",
+                    color=discord.Color.green()
+                )
+            else:
+                embed = discord.Embed(
+                    title="❌ 重新連接失敗",
+                    description="無法連接到任何 Lavalink 伺服器",
+                    color=discord.Color.red()
+                )
+            
+            # 統一發送回應
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            logger.error(f"重新連接 Lavalink 失敗: {e}")
+            embed = discord.Embed(
+                title="❌ 重新連接失敗",
+                description=f"發生錯誤: {str(e)}",
+                color=discord.Color.red()
+            )
+            await send_func(embed=embed)
+    
+    @commands.hybrid_command(name="music_help", description="顯示音樂功能說明")
+    async def music_help(self, ctx: commands.Context):
+        """音樂功能說明（支援斜線指令和 prefix 指令）"""
         embed = discord.Embed(
-            title="🎲 擲骰子結果",
-            description=f"擲出 {count}d{sides}",
+            title="🎵 音樂功能說明",
+            description="完整的 Discord 音樂機器人功能列表",
             color=discord.Color.blue()
         )
         
-        embed.add_field(name="結果", value=f"{results}", inline=False)
-        if count > 1:
-            embed.add_field(name="總和", value=str(total), inline=False)
+        embed.add_field(
+            name="🎶 基本播放",
+            value=(
+                "`/play <搜尋>` - 播放音樂\n"
+                "`/next` - 播放佇列中的下一首\n"
+                "`/skip` - 跳過當前音樂\n"
+                "`/stop` - 停止播放並離開語音頻道\n"
+                "`/pause` - 暫停播放\n"
+                "`/resume` - 繼續播放"
+            ),
+            inline=False
+        )
         
-        await interaction.response.send_message(embed=embed)
+        embed.add_field(
+            name="📋 佇列管理",
+            value=(
+                "`/queue` - 顯示播放佇列\n"
+                "`/clear` - 清空佇列\n"
+                "`/shuffle` - 切換隨機播放\n"
+                "`/loop` - 切換循環模式\n"
+                "`/remove <位置>` - 移除指定音樂"
+            ),
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🔧 進階功能",
+            value=(
+                "`/volume` - 調整音量\n"
+                "`/nowplaying` - 顯示當前播放\n"
+                "`/autoplay` - 自動播放推薦\n"
+                "`/search <關鍵字>` - 搜尋音樂\n"
+                "`/playlist` - 播放列表管理"
+            ),
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🌐 伺服器管理",
+            value=(
+                "`/lavalink_status` - 顯示伺服器狀態\n"
+                "`/switch_lavalink` - 切換伺服器\n"
+                "`/reconnect_lavalink` - 重新連接（擁有者）"
+            ),
+            inline=False
+        )
+        
+        embed.set_footer(text="💡 提示：所有指令都支援斜線指令和傳統指令兩種方式")
+        
+        # 統一發送回應
+        await ctx.send(embed=embed)
     
-    @app_commands.command(name="random", description="產生隨機數")
-    @app_commands.describe(min="最小值", max="最大值")
-    async def random_number(self, interaction: discord.Interaction, min: int = 1, max: int = 100):
-        """產生隨機數"""
-        if min >= max:
-            await interaction.response.send_message("❌ 最小值必須小於最大值", ephemeral=True)
-            return
+    @commands.hybrid_command(name="test_version_matching", description="測試版本匹配功能")
+    @commands.is_owner()
+    async def test_version_matching(self, ctx: commands.Context):
+        """測試版本匹配功能（僅限擁有者）"""
+        # 安全的交互類型處理
+        try:
+            if hasattr(ctx, 'interaction') and ctx.interaction is not None:
+                await ctx.defer()
+            send_func = ctx.send
+        except Exception as e:
+            logger.error(f"處理交互類型時出錯: {e}")
+            send_func = ctx.send
+        
+        try:
+            # 獲取 Lavalink 管理器
+            try:
+                from utils.lavalink_manager import lavalink_manager
+            except ImportError:
+                await send_func("❌ Lavalink 管理器未載入")
+                return
             
-        number = random.randint(min, max)
-        await interaction.response.send_message(f"🔢 隨機數 ({min}-{max}): **{number}**")
+            embed = discord.Embed(
+                title="🔬 版本匹配功能測試",
+                description="正在測試智能版本匹配和伺服器選擇功能...",
+                color=discord.Color.blue()
+            )
+            
+            # 顯示系統資訊
+            embed.add_field(
+                name="📋 系統資訊",
+                value=(
+                    f"Wavelink 版本: **{lavalink_manager.wavelink_version}**\n"
+                    f"偏好 Lavalink 版本: **{lavalink_manager.preferred_lavalink_version}**\n"
+                    f"總伺服器數: **{len(lavalink_manager.servers)}** 個"
+                ),
+                inline=False
+            )
+            
+            # 測試伺服器過濾
+            compatible_servers = lavalink_manager._get_compatible_servers()
+            embed.add_field(
+                name="🎯 相容性測試",
+                value=(
+                    f"相容伺服器: **{len(compatible_servers)}** 個\n"
+                    f"過濾比例: **{len(compatible_servers)/max(len(lavalink_manager.servers), 1)*100:.1f}%**"
+                ),
+                inline=True
+            )
+            
+            # 顯示排序結果
+            if compatible_servers:
+                sorted_servers = sorted(compatible_servers, key=lavalink_manager._server_sort_key)
+                top_servers = []
+                for i, server in enumerate(sorted_servers[:5], 1):
+                    version_emoji = "🆕" if server.version == "4.x" else "📦" if server.version == "3.x" else "❓"
+                    priority_text = f"P{server.priority}" if server.priority < 10 else f"P{server.priority}"
+                    status_emoji = "🟢" if server.status == "online" else "🔴" if server.status == "offline" else "⚠️"
+                    top_servers.append(f"{i}. {version_emoji}{status_emoji} {server.name[:20]}... ({priority_text})")
+                
+                embed.add_field(
+                    name="🏆 智能排序結果（前5名）",
+                    value="\n".join(top_servers) if top_servers else "無相容伺服器",
+                    inline=False
+                )
+            
+            # 版本統計
+            version_stats = {}
+            for server in lavalink_manager.servers:
+                version_stats[server.version] = version_stats.get(server.version, 0) + 1
+            
+            version_text = []
+            for version, count in version_stats.items():
+                emoji = "🆕" if version == "4.x" else "📦" if version == "3.x" else "❓"
+                is_preferred = " ⭐" if version == lavalink_manager.preferred_lavalink_version else ""
+                version_text.append(f"{emoji} {version}: {count} 個{is_preferred}")
+            
+            embed.add_field(
+                name="📊 版本分佈統計",
+                value="\n".join(version_text) if version_text else "無資料",
+                inline=True
+            )
+            
+            # 功能測試結果
+            test_results = []
+            
+            # 測試1: 版本檢測
+            try:
+                detected_version = lavalink_manager._detect_wavelink_version()
+                test_results.append(f"✅ 版本檢測: {detected_version}")
+            except Exception as e:
+                test_results.append(f"❌ 版本檢測失敗: {str(e)[:30]}...")
+            
+            # 測試2: 伺服器過濾
+            try:
+                filtered = lavalink_manager._get_compatible_servers()
+                test_results.append(f"✅ 伺服器過濾: {len(filtered)} 個")
+            except Exception as e:
+                test_results.append(f"❌ 伺服器過濾失敗: {str(e)[:30]}...")
+            
+            # 測試3: 排序算法
+            try:
+                if compatible_servers:
+                    sorted_test = sorted(compatible_servers, key=lavalink_manager._server_sort_key)
+                    test_results.append(f"✅ 排序算法: {len(sorted_test)} 個")
+                else:
+                    test_results.append("⚠️ 排序算法: 無伺服器可排序")
+            except Exception as e:
+                test_results.append(f"❌ 排序算法失敗: {str(e)[:30]}...")
+            
+            embed.add_field(
+                name="🧪 功能測試結果",
+                value="\n".join(test_results),
+                inline=False
+            )
+            
+            # 建議
+            suggestions = []
+            if len(compatible_servers) == 0:
+                suggestions.append("• 沒有相容伺服器，請檢查版本設定")
+            elif len(compatible_servers) < len(lavalink_manager.servers) / 2:
+                suggestions.append("• 相容伺服器較少，考慮升級 Wavelink")
+            else:
+                suggestions.append("• 版本匹配運作正常！")
+            
+            if version_stats.get("unknown", 0) > 0:
+                suggestions.append("• 有未知版本伺服器，建議更新伺服器資訊")
+            
+            embed.add_field(
+                name="💡 建議",
+                value="\n".join(suggestions),
+                inline=False
+            )
+            
+            await send_func(embed=embed)
+            
+        except Exception as e:
+            logger.error(f"版本匹配測試失敗: {e}")
+            embed = discord.Embed(
+                title="❌ 測試失敗",
+                description=f"發生錯誤: {str(e)}",
+                color=discord.Color.red()
+            )
+            await send_func(embed=embed)
     
-    @app_commands.command(name="choose", description="從多個選項中選擇一個")
-    @app_commands.describe(choices="選項，用逗號分隔")
-    async def choose(self, interaction: discord.Interaction, choices: str):
-        """從多個選項中選擇一個"""
-        options = [option.strip() for option in choices.split(",") if option.strip()]
-        
-        if not options:
-            await interaction.response.send_message("❌ 請提供至少一個選項", ephemeral=True)
-            return
-        
-        if len(options) == 1:
-            await interaction.response.send_message(f"🤔 只有一個選項：**{options[0]}**")
-            return
-            
-        chosen = random.choice(options)
+    @commands.hybrid_command(name="test_slash", description="測試指令是否正常工作")
+    async def test_slash(self, ctx: commands.Context):
+        """測試指令功能（支援斜線指令和 prefix 指令）"""
+        # 判斷指令類型
+        try:
+            command_type = "斜線指令" if (hasattr(ctx, 'interaction') and ctx.interaction) else "Prefix 指令"
+        except:
+            command_type = "未知類型"
         
         embed = discord.Embed(
-            title="🎯 選擇結果",
-            description=f"我選擇了：**{chosen}**",
+            title=f"✅ {command_type}測試成功",
+            description=f"如果你能看到這個訊息，表示{command_type}正常工作！",
             color=discord.Color.green()
         )
-        
-        embed.add_field(name="所有選項", value="\n".join(f"• {option}" for option in options), inline=False)
-        
-        await interaction.response.send_message(embed=embed)
-    
-    @app_commands.command(name="poll", description="創建一個投票")
-    @app_commands.describe(
-        question="投票問題",
-        options="選項，用逗號分隔 (最多10個)",
-        time="投票時間（分鐘，預設5分鐘）"
-    )
-    async def poll(self, interaction: discord.Interaction, question: str, options: str, time: int = 5):
-        """創建一個投票"""
-        option_list = [option.strip() for option in options.split(",") if option.strip()]
-        
-        if not option_list:
-            await interaction.response.send_message("❌ 請提供至少一個選項", ephemeral=True)
-            return
-            
-        if len(option_list) > 10:
-            await interaction.response.send_message("❌ 最多只能有10個選項", ephemeral=True)
-            return
-            
-        if time < 1 or time > 60:
-            await interaction.response.send_message("❌ 投票時間必須在1-60分鐘之間", ephemeral=True)
-            return
-        
-        # 創建投票嵌入
-        embed = discord.Embed(
-            title=f"📊 投票：{question}",
-            description="請點擊下方的反應來投票！",
-            color=discord.Color.blue(),
-            timestamp=interaction.created_at
+        embed.add_field(
+            name="📊 系統資訊",
+            value=f"伺服器: {ctx.guild.name if ctx.guild else 'DM'}\n用戶: {ctx.author.display_name}\n指令類型: {command_type}",
+            inline=False
         )
         
-        # 使用表情符號作為選項
-        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-        
-        for i, option in enumerate(option_list):
-            embed.add_field(name=f"{emojis[i]} 選項 {i+1}", value=option, inline=False)
-        
-        embed.set_footer(text=f"投票將在 {time} 分鐘後結束 • 由 {interaction.user.display_name} 發起")
-        
-        await interaction.response.send_message("📊 投票已創建！", embed=embed)
-        message = await interaction.original_response()
-        
-        # 添加反應
-        for i in range(len(option_list)):
-            await message.add_reaction(emojis[i])
-        
-        # 等待投票結束
-        await asyncio.sleep(time * 60)
-        
-        # 獲取最新的消息（包含反應）
-        message = await interaction.channel.fetch_message(message.id)
-        
-        # 計算結果
-        results = []
-        for i, emoji in enumerate(emojis[:len(option_list)]):
-            reaction = discord.utils.get(message.reactions, emoji=emoji)
-            count = reaction.count - 1  # 減去機器人的反應
-            results.append((option_list[i], count))
-        
-        # 創建結果嵌入
-        result_embed = discord.Embed(
-            title=f"📊 投票結果：{question}",
-            color=discord.Color.gold(),
-            timestamp=interaction.created_at
-        )
-        
-        # 排序結果
-        results.sort(key=lambda x: x[1], reverse=True)
-        
-        for i, (option, count) in enumerate(results):
-            result_embed.add_field(name=f"{emojis[i]} {option}", value=f"{count} 票", inline=False)
-        
-        result_embed.set_footer(text=f"投票已結束 • 由 {interaction.user.display_name} 發起")
-        
-        await interaction.followup.send("📊 投票結果出爐！", embed=result_embed)
-    
-    @app_commands.command(name="userinfo", description="顯示用戶資訊")
-    @app_commands.describe(user="要查詢的用戶（預設為自己）")
-    async def userinfo(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
-        """顯示用戶資訊"""
-        target = user or interaction.user
-        
-        embed = discord.Embed(
-            title=f"👤 用戶資訊: {target.display_name}",
-            color=target.color
-        )
-        
-        embed.set_thumbnail(url=target.display_avatar.url)
-        
-        embed.add_field(name="用戶名", value=str(target), inline=True)
-        embed.add_field(name="ID", value=target.id, inline=True)
-        embed.add_field(name="創建日期", value=target.created_at.strftime("%Y-%m-%d %H:%M:%S"), inline=True)
-        
-        if isinstance(target, discord.Member):
-            embed.add_field(name="加入伺服器日期", value=target.joined_at.strftime("%Y-%m-%d %H:%M:%S"), inline=True)
-            embed.add_field(name="最高身分組", value=target.top_role.mention, inline=True)
-            embed.add_field(name="身分組數量", value=len(target.roles) - 1, inline=True)  # 減去 @everyone
-        
-        await interaction.response.send_message(embed=embed)
-    
-    @app_commands.command(name="serverinfo", description="顯示伺服器資訊")
-    async def serverinfo(self, interaction: discord.Interaction):
-        """顯示伺服器資訊"""
-        guild = interaction.guild
-        
-        embed = discord.Embed(
-            title=f"ℹ️ 伺服器資訊: {guild.name}",
-            color=discord.Color.blue()
-        )
-        
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-        
-        # 基本資訊
-        embed.add_field(name="ID", value=guild.id, inline=True)
-        embed.add_field(name="擁有者", value=f"<@{guild.owner_id}>", inline=True)
-        embed.add_field(name="創建日期", value=guild.created_at.strftime("%Y-%m-%d %H:%M:%S"), inline=True)
-        
-        # 成員統計
-        member_count = guild.member_count
-        bot_count = len([m for m in guild.members if m.bot])
-        human_count = member_count - bot_count
-        
-        embed.add_field(name="成員總數", value=member_count, inline=True)
-        embed.add_field(name="人類", value=human_count, inline=True)
-        embed.add_field(name="機器人", value=bot_count, inline=True)
-        
-        # 頻道統計
-        text_channels = len(guild.text_channels)
-        voice_channels = len(guild.voice_channels)
-        categories = len(guild.categories)
-        
-        embed.add_field(name="文字頻道", value=text_channels, inline=True)
-        embed.add_field(name="語音頻道", value=voice_channels, inline=True)
-        embed.add_field(name="類別", value=categories, inline=True)
-        
-        # 其他資訊
-        embed.add_field(name="表情符號數量", value=len(guild.emojis), inline=True)
-        embed.add_field(name="身分組數量", value=len(guild.roles), inline=True)
-        embed.add_field(name="加成等級", value=guild.premium_tier, inline=True)
-        
-        await interaction.response.send_message(embed=embed)
-    
-    @app_commands.command(name="avatar", description="顯示用戶頭像")
-    @app_commands.describe(user="要查看頭像的用戶（預設為自己）")
-    async def avatar(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
-        """顯示用戶頭像"""
-        target = user or interaction.user
-        
-        embed = discord.Embed(
-            title=f"{target.display_name} 的頭像",
-            color=discord.Color.blue()
-        )
-        
-        embed.set_image(url=target.display_avatar.url)
-        
-        await interaction.response.send_message(embed=embed)
+        # 統一發送回應
+        await ctx.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(SlashCommands(bot))
