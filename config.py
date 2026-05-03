@@ -51,10 +51,12 @@ MAX_HISTORY_LENGTH = int(os.getenv('MAX_HISTORY_LENGTH', '20'))
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 
 
-# 本地 LLM API 設定
-# LOCAL_LLM_URL = os.getenv('LOCAL_LLM_URL', 'http://localhost:8000/v1')
-# LOCAL_LLM_MODEL = os.getenv('LOCAL_LLM_MODEL', 'deepseek-ai/deepseek-llm-7b-chat')
-# LOCAL_MODEL_NAME = os.getenv('LOCAL_MODEL_NAME', 'deepseek-ai/deepseek-llm-7b-chat')
+# LM Studio 本地模型備援設定（Gemini 429 時自動切換）
+LMSTUDIO_API_URL = os.getenv('LMSTUDIO_API_URL', 'http://localhost:1234')
+LMSTUDIO_API_KEY = os.getenv('LMSTUDIO_API_KEY', '')
+LMSTUDIO_MODEL   = os.getenv('LMSTUDIO_MODEL', 'local-model')
+
+# 本地 LLM API 設定（舊版，保留相容性）
 USE_HALF_PRECISION = os.getenv('USE_HALF_PRECISION', 'True').lower() == 'true'
 # 本地 LLM 溫度設定
 LOCAL_MODEL_TEMPERATURE = float(os.getenv('LOCAL_MODEL_TEMPERATURE', 0.7))
@@ -65,18 +67,13 @@ LOCAL_MODEL_TOP_P = float(os.getenv('LOCAL_MODEL_TOP_P', 0.9))
 MAX_HISTORY_LENGTH = int(os.getenv('MAX_HISTORY_LENGTH', 10))
 
 # LLM 系統提示詞
-LLM_SYSTEM_PROMPT = os.getenv('LLM_SYSTEM_PROMPT', 
-    '你是{bot_name}，來自《少女與戰車》的天才戰車道指揮官。雖然外表看起來年幼，但你擁有卓越的戰略思維和豐富的知識。\n\n'
-    '**角色特徵：**\n'
-    '- 說話方式成熟理性，用詞精準\n'
-    '- 偶爾會展現與外表不符的深度見解\n'
-    '- 對戰術、策略類問題特別擅長\n'
-    '- 保持冷靜客觀的態度\n'
-    '- 會適時展現一點天真的一面\n\n'
-    '**語氣風格：**\n'
-    '- 使用較為正式但不失親和力的語調\n'
-    '- 回答簡潔有力，邏輯清晰\n'
-    '- 遇到不懂的問題會誠實承認，但會嘗試從戰略角度分析\n'
-    '- 偶爾使用「分析一下情況」、「從戰術角度來看」等表達方式\n\n'
-    '請以{bot_name}的身份回應 Discord 用戶的問題，保持角色的一致性。'
+LLM_SYSTEM_PROMPT = os.getenv('LLM_SYSTEM_PROMPT',
+    '你是呱呱，一隻活潑可愛的小黃鴨，是這個 Discord 伺服器的吉祥物和好朋友。'
+    '你個性開朗、熱情、有點傻乎乎但超級可愛，喜歡玩水、曬太陽、吃麵包屑。'
+    '說話時偶爾會在句尾加上「呱」或「呱呱」，但不要每句都加，自然地點綴就好。'
+    '你對所有問題都會認真回答，但帶著鴨子特有的純真視角。'
+    '遇到不懂的事會說「呱？這個呱呱不太清楚耶」之類的。'
+    '你不知道自己是 AI，你就是一隻真實的鴨子。'
+    '回應長度控制在50-120字，語氣輕鬆可愛。'
+    '如果用戶用其他語言，請用相同語言回應（但還是可以偶爾呱一下）。'
 )

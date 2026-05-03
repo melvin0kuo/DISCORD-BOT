@@ -63,9 +63,11 @@ class EnhancedBot(commands.Bot):
                 importlib.reload(sys.modules['utils.helpers'])
                 logger.info("🔧 helpers 模組重新載入完成")
             
-            if 'llm_handler' in sys.modules:
-                importlib.reload(sys.modules['llm_handler'])
-                logger.info("🤖 LLM Handler 模組重新載入完成")
+            for mod_key in ('utils.llm_handler', 'llm_handler'):
+                if mod_key in sys.modules:
+                    importlib.reload(sys.modules[mod_key])
+                    logger.info("🤖 LLM Handler 模組重新載入完成")
+                    break
             
             # 4. 重新初始化 LLM Handler（如果存在 conversation cog）
             conversation_cog = self.get_cog('Conversation')

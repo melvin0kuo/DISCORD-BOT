@@ -1,3 +1,4 @@
+import time
 import discord
 from discord.ext import commands
 import random
@@ -174,13 +175,15 @@ class Conversation(commands.Cog):
                         logger.info(f"已添加完整上下文，總長度: {len(full_context)}")
                     
                     logger.info("開始生成 LLM 回應...")
+                    last_edit = 0.0
                     async for chunk in self.llm_handler.get_llm_response_stream(str(message.author.id), channel_id, parts):
                         if chunk:
                             response_text += chunk
-                            # 避免太頻繁編輯，僅每 0.5 秒編輯一次
-                            if len(response_text) < 50 or len(response_text) % 20 == 0:
+                            now = time.monotonic()
+                            if now - last_edit >= 0.8:
                                 try:
                                     await sent_message.edit(content=response_text)
+                                    last_edit = now
                                 except Exception:
                                     pass
                     
@@ -314,13 +317,15 @@ class Conversation(commands.Cog):
                 response_text = ""
                 sent_message = await ctx.send("💬 思考中...")
                 
+                last_edit = 0.0
                 async for chunk in self.llm_handler.get_llm_response_stream(str(ctx.author.id), channel_id, parts):
                     if chunk:
                         response_text += chunk
-                        # 避免太頻繁編輯
-                        if len(response_text) < 50 or len(response_text) % 20 == 0:
+                        now = time.monotonic()
+                        if now - last_edit >= 0.8:
                             try:
                                 await sent_message.edit(content=response_text)
+                                last_edit = now
                             except Exception:
                                 pass
                 
@@ -384,14 +389,25 @@ class Conversation(commands.Cog):
             logger.error(f"獲取模型信息時出錯: {e}", exc_info=True)
             await ctx.send(f"抱歉，獲取模型信息時出現錯誤: {str(e)}")
 
-    @commands.command(name="switch_model", help="切換 LLM 模型類型")
-    async def switch_model(self, ctx, model_type: str):
+    @commands.command(name="switch_model", help="切換 LLM 模型類型 (gemini / local)")
+    async def switch_model(self, ctx, model_type: str = None):
+        if model_type is None:
+            info = self.llm_handler.get_current_model_info()
+            await ctx.send(
+                f"目前使用: **{info['type']}** (`{info['name']}`)\n"
+                f"可切換: `!switch_model gemini` 或 `!switch_model local`"
+            )
+            return
         try:
             success = self.llm_handler.switch_model(model_type)
             if success:
-                await ctx.send(f"已切換到 {model_type} 模型。")
+                info = self.llm_handler.get_current_model_info()
+                await ctx.send(f"已切換至 **{info['type']}** (`{info['name']}`)")
             else:
-                await ctx.send(f"切換到 {model_type} 模型失敗，請檢查模型類型是否正確。")
+                await ctx.send(
+                    f"切換失敗。可用選項: `gemini` / `local`\n"
+                    f"（切換至 local 需先在 .env 設定 LMSTUDIO_API_URL 和 LMSTUDIO_API_KEY）"
+                )
         except Exception as e:
             logger.error(f"切換模型時出錯: {e}", exc_info=True)
             await ctx.send(f"切換模型時出錯: {str(e)}")
