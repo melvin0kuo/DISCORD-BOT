@@ -134,10 +134,6 @@ class Conversation(commands.Cog):
                             if user_context:
                                 mentioned_contexts.append(f"【{user.display_name} 的資訊】{user_context}")
                     
-                    # 先送出一則訊息，後續用 edit 更新
-                    sent_message = await message.channel.send("💬 思考中...")
-                    response_text = ""
-                    
                     # 獲取發送訊息用戶的完整上下文（個人資料、標籤、記憶等）
                     logger.info("正在獲取用戶完整上下文...")
                     user_context = self.llm_handler.get_user_full_context(str(message.author.id), channel_id)
@@ -191,21 +187,12 @@ class Conversation(commands.Cog):
                         logger.info(f"已添加完整上下文，總長度: {len(full_context)}")
                     
                     logger.info("開始生成 LLM 回應...")
-                    last_edit = 0.0
-                    async for chunk in self.llm_handler.get_llm_response_stream(str(message.author.id), channel_id, parts):
-                        if chunk:
-                            response_text += chunk
-                            now = time.monotonic()
-                            if now - last_edit >= 0.8:
-                                try:
-                                    await sent_message.edit(content=response_text)
-                                    last_edit = now
-                                except Exception:
-                                    pass
-                    
+                    response_text = await self._stream_with_pagination(
+                        message.channel,
+                        self.llm_handler.get_llm_response_stream(str(message.author.id), channel_id, parts),
+                    )
                     logger.info(f"LLM 回應生成完成，長度: {len(response_text)}")
-                    
-                    # 最後再編輯一次完整內容
+
                     # 嘗試自動偵測 Gemini 回應中的 base64 圖片或檔案
                     import re, base64, io
                     img_match = re.search(r'data:image/[^;]+;base64,([A-Za-z0-9+/=]+)', response_text)
@@ -218,11 +205,9 @@ class Conversation(commands.Cog):
                         file_bytes = base64.b64decode(file_match.group(1))
                         file = discord.File(io.BytesIO(file_bytes), filename="gemini_file.txt")
                         await message.channel.send("Gemini 回傳檔案：", file=file)
+
                     if response_text:
-                        await sent_message.edit(content=response_text)
                         logger.info("對話處理完成，已發送回應")
-                        
-                        # 記錄 AI 回應
                         user_db.log_interaction(
                             user_id=str(message.author.id),
                             interaction_type="ai_response",
@@ -232,8 +217,6 @@ class Conversation(commands.Cog):
                                 "response_length": len(response_text)
                             }
                         )
-                    else:
-                        await sent_message.edit(content="❌ 抱歉，我無法生成回應。請稍後再試。")
                         logger.warning("對話處理完成，但沒有生成回應")
                 except Exception as e:
                     logger.error(f"生成回應時出錯: {e}", exc_info=True)
@@ -248,6 +231,49 @@ class Conversation(commands.Cog):
             # 處理完成後移除訊息標記
             if message_key and message_key in self.processing_messages:
                 self.processing_messages.remove(message_key)
+
+    async def _stream_with_pagination(self, channel, stream_gen) -> str:
+        """串流 LLM 回應並自動分頁（Discord 單則訊息上限 2000 字元）"""
+        LIMIT = 1900  # 留緩衝避免邊界錯誤
+        sent_msg = await channel.send("💬 思考中...")
+        current_page = ""
+        full_response = ""
+        last_edit = 0.0
+
+        async for chunk in stream_gen:
+            if not chunk:
+                continue
+            full_response += chunk
+
+            # chunk 本身超長時直接切割
+            while len(chunk) > LIMIT:
+                piece, chunk = chunk[:LIMIT], chunk[LIMIT:]
+                if current_page:
+                    await sent_msg.edit(content=current_page)
+                sent_msg = await channel.send(piece)
+                current_page = piece
+                last_edit = time.monotonic()
+
+            if len(current_page) + len(chunk) > LIMIT:
+                # 當前頁已滿：定稿並開新訊息
+                await sent_msg.edit(content=current_page)
+                sent_msg = await channel.send(chunk)
+                current_page = chunk
+                last_edit = time.monotonic()
+            else:
+                current_page += chunk
+                now = time.monotonic()
+                if now - last_edit >= 0.8:
+                    try:
+                        await sent_msg.edit(content=current_page)
+                        last_edit = now
+                    except Exception:
+                        pass
+
+        if current_page:
+            await sent_msg.edit(content=current_page)
+
+        return full_response
 
     async def _send_typing_effect(self, channel, text, user=None, is_dm=False):
         if len(text) > 1500:
@@ -329,26 +355,12 @@ class Conversation(commands.Cog):
                 if user_context:
                     parts.insert(0, {"text": f"【用戶 {ctx.author.display_name} 的個人資訊】\n{user_context}"})
                 
-                # 使用流式回應
-                response_text = ""
-                sent_message = await ctx.send("💬 思考中...")
-                
-                last_edit = 0.0
-                async for chunk in self.llm_handler.get_llm_response_stream(str(ctx.author.id), channel_id, parts):
-                    if chunk:
-                        response_text += chunk
-                        now = time.monotonic()
-                        if now - last_edit >= 0.8:
-                            try:
-                                await sent_message.edit(content=response_text)
-                                last_edit = now
-                            except Exception:
-                                pass
-                
-                # 最終編輯完整回應
+                response_text = await self._stream_with_pagination(
+                    ctx.channel,
+                    self.llm_handler.get_llm_response_stream(str(ctx.author.id), channel_id, parts),
+                )
+
                 if response_text:
-                    await sent_message.edit(content=response_text)
-                    
                     # 記錄 AI 回應
                     user_db.log_interaction(
                         user_id=str(ctx.author.id),
@@ -361,8 +373,8 @@ class Conversation(commands.Cog):
                         }
                     )
                 else:
-                    await sent_message.edit(content="❌ 抱歉，我無法生成回應。請稍後再試。")
-                
+                    await ctx.send("❌ 抱歉，我無法生成回應。請稍後再試。")
+
             except Exception as e:
                 logger.error(f"聊天命令出錯: {e}", exc_info=True)
                 await ctx.send(f"抱歉，生成回應時出現錯誤: {str(e)}")
