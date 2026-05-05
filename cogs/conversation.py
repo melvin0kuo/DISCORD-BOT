@@ -155,18 +155,34 @@ class Conversation(commands.Cog):
                     
                     # 組合所有上下文資訊
                     context_blocks = []
-                    
+
                     # 1. 用戶個人上下文（最重要，放在最前面）
                     if user_context:
                         context_blocks.append(f"【用戶 {message.author.display_name} 的個人資訊】\n{user_context}")
-                    
+
                     # 2. 向量資料庫相關上下文
                     if vector_context:
                         context_blocks.append(f"【相關歷史對話】\n{vector_context}")
-                    
+
                     # 3. 被提及用戶的上下文
                     if mentioned_contexts:
                         context_blocks.extend(mentioned_contexts)
+
+                    # 4. 頻道最近 20 條訊息（讓 LLM 掌握當前對話脈絡）
+                    try:
+                        history_lines = []
+                        async for msg in message.channel.history(limit=20, before=message):
+                            if msg.content.startswith(config.PREFIX):
+                                continue
+                            text = msg.content or "(附件或嵌入內容)"
+                            history_lines.append(f"[{msg.author.display_name}]: {text}")
+                        if history_lines:
+                            history_lines.reverse()  # 由舊到新
+                            context_blocks.append(
+                                "【頻道最近訊息記錄（由舊到新）】\n" + "\n".join(history_lines)
+                            )
+                    except Exception as _hist_err:
+                        logger.warning(f"獲取頻道訊息歷史失敗: {_hist_err}")
                     
                     # 將所有上下文插入到 parts 最前面
                     if context_blocks:
