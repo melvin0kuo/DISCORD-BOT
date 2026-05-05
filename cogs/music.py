@@ -102,29 +102,41 @@ class MusicControlView(discord.ui.View):
     @discord.ui.button(emoji="⏯️", style=discord.ButtonStyle.primary)
     async def play_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
         """播放/暫停按鈕"""
-        if self.player.paused:
-            await self.player.pause(False)
-            await interaction.response.send_message("▶️ 繼續播放", ephemeral=True)
-        else:
-            await self.player.pause(True)
-            await interaction.response.send_message("⏸️ 已暫停", ephemeral=True)
-    
+        try:
+            if self.player.paused:
+                await self.player.pause(False)
+                await interaction.response.send_message("▶️ 繼續播放", ephemeral=True)
+            else:
+                await self.player.pause(True)
+                await interaction.response.send_message("⏸️ 已暫停", ephemeral=True)
+        except Exception as e:
+            logger.warning(f"[MusicControlView] play_pause 失敗: {e}")
+            await interaction.response.send_message("⚠️ 操作失敗，Lavalink 節點暫時無回應，請稍後再試。", ephemeral=True)
+
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary)
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         """跳過按鈕"""
-        if self.player.current:
+        if not self.player.current:
+            await interaction.response.send_message("❌ 沒有正在播放的音樂", ephemeral=True)
+            return
+        try:
             await self.player.stop()
             await interaction.response.send_message("⏭️ 已跳過", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ 沒有正在播放的音樂", ephemeral=True)
-    
+        except Exception as e:
+            logger.warning(f"[MusicControlView] skip 失敗: {e}")
+            await interaction.response.send_message("⚠️ 跳過失敗，Lavalink 節點暫時無回應，請稍後再試。", ephemeral=True)
+
     @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger)
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         """停止按鈕"""
         queue = self.music_cog.get_queue(interaction.guild.id)
         queue.clear()
-        await self.player.stop()
-        await interaction.response.send_message("⏹️ 已停止播放並清空佇列", ephemeral=True)
+        try:
+            await self.player.stop()
+            await interaction.response.send_message("⏹️ 已停止播放並清空佇列", ephemeral=True)
+        except Exception as e:
+            logger.warning(f"[MusicControlView] stop 失敗: {e}")
+            await interaction.response.send_message("⚠️ 停止失敗，Lavalink 節點暫時無回應。", ephemeral=True)
     
     @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary)
     async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
