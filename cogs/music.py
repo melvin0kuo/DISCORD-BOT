@@ -1,4 +1,5 @@
 # Enhanced Music Cog with UI, Playlist, Autoplay, and More
+import re
 import discord
 from discord.ext import commands
 import wavelink
@@ -850,8 +851,20 @@ class EnhancedMusic(commands.Cog):
             except Exception as recovery_error:
                 logger.error(f"❌ 播放狀態恢復失敗: {recovery_error}")
 
+    def _extract_youtube_id(self, uri: str) -> Optional[str]:
+        """從 YouTube URL 或 identifier 提取 video ID"""
+        if not uri:
+            return None
+        m = re.search(r'(?:v=|youtu\.be/|/embed/|/v/)([a-zA-Z0-9_-]{11})', uri)
+        if m:
+            return m.group(1)
+        # wavelink 有時 identifier 本身就是 11 位 ID
+        if re.fullmatch(r'[a-zA-Z0-9_-]{11}', uri):
+            return uri
+        return None
+
     async def auto_recommend_and_play(self, player: wavelink.Player):
-        """自動推薦並將音樂加入佇列（改進穩定性）"""
+        """自動推薦並將音樂加入佇列（YouTube Radio 優先）"""
         try:
             guild_id = player.guild.id
             queue = self.get_queue(guild_id)
@@ -864,94 +877,79 @@ class EnhancedMusic(commands.Cog):
             self.autoplay_stats[guild_id]['last_attempt'] = time.time()
             
             logger.info(f"🤖 開始自動推薦 (嘗試 #{self.autoplay_stats[guild_id]['attempts']}) - 歷史記錄: {len(queue.history)} 首")
-            
-            # 優化推薦策略
+
+            played_titles = {h.title.lower() for h in queue.history[-30:]}
             recommended_track = None
-            
-            # 策略 1: 基於最近播放的歌曲推薦
-            if queue.history and len(queue.history) >= 1:
-                # 取最近 3 首歌曲進行推薦
-                recent_tracks = queue.history[-3:]
-                
-                for track in reversed(recent_tracks):  # 從最新的開始
-                    if not track.author or not track.title:
+
+            def pick_from(candidates):
+                """從候選清單中隨機挑一首未播過的"""
+                eligible = [t for t in candidates if t.title.lower() not in played_titles]
+                return random.choice(eligible) if eligible else None
+
+            # ── 策略 1：YouTube Radio（RDAMVM）——風格最相近 ──────────────
+            # YouTube Music 的 Radio 功能：基於同一首歌自動生成相似曲目清單
+            if queue.history:
+                for base_track in reversed(queue.history[-5:]):
+                    vid_id = self._extract_youtube_id(
+                        getattr(base_track, 'uri', None) or getattr(base_track, 'identifier', None)
+                    )
+                    if not vid_id:
                         continue
-                        
-                    # 多種搜尋策略
-                    search_strategies = [
-                        f"{track.author}",  # 同一作者
-                        f"{track.title.split()[0]} music",  # 標題關鍵字
-                        f"{track.author} best songs",  # 作者熱門歌曲
-                    ]
-                    
-                    for strategy in search_strategies:
-                        try:
-                            logger.info(f"🔍 搜尋策略: {strategy}")
-                            tracks = await wavelink.Playable.search(strategy)
-                            
-                            if tracks and len(tracks) > 0:
-                                # 過濾已播放的歌曲
-                                played_titles = {h.title.lower() for h in queue.history[-20:]}
-                                available_tracks = [
-                                    t for t in tracks[:15]
-                                    if t.title.lower() not in played_titles and
-                                    t.length < 600000  # 限制在 10 分鐘內
-                                ]
-                                
-                                if available_tracks:
-                                    recommended_track = random.choice(available_tracks)
-                                    logger.info(f"✅ 找到推薦歌曲: {recommended_track.title} (策略: {strategy})")
-                                    break
-                        except Exception as e:
-                            logger.warning(f"⚠️ 搜尋策略 '{strategy}' 失敗: {e}")
-                            continue
-                    
-                    if recommended_track:
-                        break
-            
-            # 策略 2: 如果基於歷史的推薦失敗，使用通用熱門音樂
-            if not recommended_track:
-                logger.info("🎯 使用熱門音樂推薦")
-                popular_searches = [
-                    "pop music 2024",
-                    "trending songs",
-                    "Billboard Hot 100",
-                    "popular hits",
-                    "radio music"
-                ]
-                
-                for search_term in popular_searches:
+                    radio_url = f"https://www.youtube.com/playlist?list=RDAMVM{vid_id}"
                     try:
-                        tracks = await wavelink.Playable.search(search_term)
-                        if tracks and len(tracks) > 0:
-                            # 選擇較短的歌曲避免過長
-                            suitable_tracks = [
-                                t for t in tracks[:20]
-                                if hasattr(t, 'length') and t.length < 480000  # 8 分鐘內
-                            ]
-                            
-                            if suitable_tracks:
-                                recommended_track = random.choice(suitable_tracks)
-                                logger.info(f"✅ 找到熱門推薦: {recommended_track.title}")
-                                break
-                    except Exception as e:
-                        logger.warning(f"⚠️ 熱門搜尋 '{search_term}' 失敗: {e}")
-                        continue
-            
-            # 策略 3: 最後備用方案 - 簡單的音樂搜尋
-            if not recommended_track:
-                logger.info("🎲 使用備用推薦方案")
-                backup_searches = ["music", "songs", "hits"]
-                
-                for term in backup_searches:
-                    try:
-                        tracks = await wavelink.Playable.search(term)
-                        if tracks:
-                            recommended_track = random.choice(tracks[:5])
-                            logger.info(f"✅ 備用推薦: {recommended_track.title}")
+                        result = await wavelink.Playable.search(radio_url)
+                        radio_tracks = result.tracks if isinstance(result, wavelink.Playlist) else (result if isinstance(result, list) else [])
+                        recommended_track = pick_from(radio_tracks)
+                        if recommended_track:
+                            logger.info(f"✅ [Radio] {recommended_track.title} (基於 {base_track.title})")
                             break
-                    except:
-                        continue
+                    except Exception as e:
+                        logger.debug(f"Radio 搜尋失敗 ({vid_id}): {e}")
+
+            # ── 策略 2：同類型關鍵字搜尋 ─────────────────────────────────
+            # 從最近播放中提取作者/標題關鍵字，擴展到同類型但不限同作者
+            if not recommended_track and queue.history:
+                recent = queue.history[-3:]
+                search_queries = []
+                for t in reversed(recent):
+                    if t.author:
+                        search_queries.append(f"{t.author} mix")
+                        search_queries.append(f"{t.author} similar artists playlist")
+                    if t.title:
+                        # 取標題第一個關鍵詞，搜尋相似風格
+                        kw = t.title.split()[0] if t.title else ""
+                        if kw:
+                            search_queries.append(f"{kw} chill mix playlist")
+
+                for q in search_queries:
+                    try:
+                        result = await wavelink.Playable.search(q)
+                        candidates = result.tracks if isinstance(result, wavelink.Playlist) else (result[:20] if isinstance(result, list) else [])
+                        recommended_track = pick_from(candidates)
+                        if recommended_track:
+                            logger.info(f"✅ [Mix 搜尋] {recommended_track.title} (查詢: {q})")
+                            break
+                    except Exception as e:
+                        logger.debug(f"Mix 搜尋失敗 ({q}): {e}")
+
+            # ── 策略 3：備用熱門榜單 ──────────────────────────────────────
+            if not recommended_track:
+                fallback_queries = [
+                    "Billboard Hot 100 2024 playlist",
+                    "trending music playlist",
+                    "popular hits mix",
+                ]
+                for q in fallback_queries:
+                    try:
+                        result = await wavelink.Playable.search(q)
+                        candidates = result.tracks if isinstance(result, wavelink.Playlist) else (result[:20] if isinstance(result, list) else [])
+                        suitable = [t for t in candidates if getattr(t, 'length', 999999) < 480000]
+                        recommended_track = pick_from(suitable) or (random.choice(suitable) if suitable else None)
+                        if recommended_track:
+                            logger.info(f"✅ [備用] {recommended_track.title}")
+                            break
+                    except Exception as e:
+                        logger.debug(f"備用搜尋失敗: {e}")
             
             # 將推薦歌曲加入佇列
             if recommended_track:
@@ -1024,8 +1022,50 @@ class EnhancedMusic(commands.Cog):
 
         if ctx.voice_client:
             logger.info(f"[join] 已在頻道，移動到 {channel.name}")
-            await ctx.voice_client.move_to(channel)
-            await ctx.send(f"✅ 已移動到語音頻道：{channel.name}")
+            try:
+                await ctx.voice_client.move_to(channel)
+                await ctx.send(f"✅ 已移動到語音頻道：{channel.name}")
+            except Exception as e:
+                logger.error(f"[join] move_to 失敗，改用斷線重連: {e}", exc_info=True)
+                try:
+                    await ctx.voice_client.disconnect()
+                except Exception:
+                    pass
+                # 斷線後走一般連線流程（重試 3 次）
+                for attempt in range(3):
+                    server_before = lavalink_manager.current_server if lavalink_manager else None
+                    try:
+                        player: wavelink.Player = await channel.connect(
+                            cls=wavelink.Player, self_deaf=True, timeout=10.0
+                        )
+                        player.last_channel = ctx.channel
+                        logger.info(f"[join] 重連成功: {channel.name}")
+                        await ctx.send(f"✅ 已重新加入語音頻道：{channel.name}")
+                        return
+                    except Exception as e2:
+                        logger.error(f"[join] 重連嘗試 #{attempt+1} 失敗: {e2}", exc_info=True)
+                        if attempt < 2:
+                            already_switched = (
+                                lavalink_manager and
+                                lavalink_manager.current_server is not None and
+                                lavalink_manager.current_server != server_before
+                            )
+                            if already_switched:
+                                await asyncio.sleep(1)
+                            else:
+                                if lavalink_manager and lavalink_manager.current_server:
+                                    lavalink_manager.current_server.status = "voice_fail"
+                                    lavalink_manager.current_server.error_count += 5
+                                switched = await self.switch_lavalink_server()
+                                if not switched:
+                                    await ctx.send("❌ 找不到其他可用的 Lavalink 伺服器，無法連接。")
+                                    return
+                                await asyncio.sleep(1)
+                        else:
+                            await ctx.send(
+                                f"❌ 移動頻道失敗，三次重連均失敗，請稍後再試。\n"
+                                f"最後錯誤: `{e2}`"
+                            )
         else:
             for attempt in range(3):
                 server_before = lavalink_manager.current_server if lavalink_manager else None
@@ -1167,6 +1207,33 @@ class EnhancedMusic(commands.Cog):
             
             if not tracks:
                 await ctx.send("❌ 找不到相關音樂。可能是搜尋服務暫時不可用，請稍後再試。")
+                return
+
+            # ── YouTube 播放清單批次導入 ──────────────────────────────────
+            if isinstance(tracks, wavelink.Playlist):
+                playlist = tracks
+                queue = self.get_queue(ctx.guild.id)
+                added = 0
+                first_track = None
+                for t in playlist.tracks:
+                    if added == 0 and not player.current:
+                        first_track = t
+                    else:
+                        queue.add(t)
+                    added += 1
+                if first_track:
+                    await player.play(first_track)
+                    queue.add_to_history(first_track)
+                embed = discord.Embed(
+                    title="📋 播放清單已導入",
+                    description=f"**{playlist.name}**",
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="歌曲數量", value=f"{added} 首", inline=True)
+                embed.add_field(name="佇列位置", value=f"第 1 ~ {added} 首", inline=True)
+                if first_track:
+                    embed.add_field(name="▶️ 正在播放", value=first_track.title, inline=False)
+                await ctx.send(embed=embed)
                 return
 
             # 若多於1首，顯示搜尋選單
@@ -1537,6 +1604,28 @@ class EnhancedMusic(commands.Cog):
         except Exception as e:
             logger.error(f"❌ 斷線時出錯: {e}")
             await ctx.send("⚠️ 已嘗試停止播放，可能需要手動離開語音頻道")
+
+    @commands.hybrid_command()
+    async def leave(self, ctx):
+        """離開語音頻道並清空佇列"""
+        player: wavelink.Player = ctx.voice_client
+        if not player:
+            await ctx.send("❌ 機器人未在語音頻道中。")
+            return
+
+        queue = self.get_queue(ctx.guild.id)
+        queue.clear()
+        self._user_stopped.add(ctx.guild.id)
+
+        try:
+            await player.disconnect()
+            await ctx.send("👋 已離開語音頻道。")
+        except LavalinkException as e:
+            logger.warning(f"⚠️ 斷線時 Lavalink 錯誤 (可忽略): {e}")
+            await ctx.send("👋 已離開語音頻道。")
+        except Exception as e:
+            logger.error(f"❌ 離開語音頻道時出錯: {e}")
+            await ctx.send("⚠️ 嘗試離開時出錯，請確認機器人狀態。")
 
     @commands.hybrid_command()
     async def seek(self, ctx, position: str):
@@ -2050,44 +2139,35 @@ class EnhancedMusic(commands.Cog):
         """生成推薦預覽（不影響實際佇列）"""
         try:
             recommendations = []
-            
-            if queue.history and len(queue.history) >= 1:
-                # 取最近 3 首歌曲進行推薦
-                recent_tracks = queue.history[-3:]
-                
-                for track in reversed(recent_tracks):
-                    if not track.author or not track.title:
-                        continue
-                        
-                    # 使用相同的推薦策略
-                    search_strategies = [
-                        f"{track.author}",  # 同一作者
-                        f"{track.title.split()[0]} music",  # 標題關鍵字
-                        f"{track.author} best songs",  # 作者熱門歌曲
-                    ]
-                    
-                    for strategy in search_strategies:
+            played_titles = {h.title.lower() for h in queue.history[-30:]}
+
+            if queue.history:
+                for base_track in reversed(queue.history[-5:]):
+                    # 優先用 YouTube Radio
+                    vid_id = self._extract_youtube_id(
+                        getattr(base_track, 'uri', None) or getattr(base_track, 'identifier', None)
+                    )
+                    if vid_id:
                         try:
-                            tracks = await wavelink.Playable.search(strategy)
-                            
-                            if tracks and len(tracks) > 0:
-                                # 過濾已播放的歌曲
-                                played_titles = {h.title.lower() for h in queue.history[-20:]}
-                                available_tracks = [
-                                    t for t in tracks[:15]
-                                    if t.title.lower() not in played_titles and
-                                    hasattr(t, 'length') and t.length < 600000  # 限制在 10 分鐘內
-                                ]
-                                
-                                if available_tracks:
-                                    # 取前幾首作為推薦
-                                    recommendations.extend(available_tracks[:3])
-                                    if len(recommendations) >= 10:  # 限制推薦數量
-                                        break
+                            result = await wavelink.Playable.search(
+                                f"https://www.youtube.com/playlist?list=RDAMVM{vid_id}"
+                            )
+                            radio_tracks = result.tracks if isinstance(result, wavelink.Playlist) else (result if isinstance(result, list) else [])
+                            eligible = [t for t in radio_tracks if t.title.lower() not in played_titles]
+                            recommendations.extend(eligible[:4])
                         except Exception as e:
-                            logger.warning(f"推薦預覽策略 '{strategy}' 失敗: {e}")
-                            continue
-                    
+                            logger.debug(f"Radio 預覽失敗: {e}")
+
+                    # 補充：同類型關鍵字搜尋
+                    if len(recommendations) < 10 and base_track.author:
+                        try:
+                            result = await wavelink.Playable.search(f"{base_track.author} mix")
+                            candidates = result if isinstance(result, list) else []
+                            eligible = [t for t in candidates[:10] if t.title.lower() not in played_titles]
+                            recommendations.extend(eligible[:3])
+                        except Exception:
+                            pass
+
                     if len(recommendations) >= 10:
                         break
             
