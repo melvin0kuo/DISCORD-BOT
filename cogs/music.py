@@ -157,6 +157,40 @@ class MusicControlView(discord.ui.View):
         mode_text = {"off": "關閉", "queue": "佇列循環", "track": "單曲循環"}
         await interaction.response.send_message(f"🔁 循環模式: {mode_text[new_mode]}", ephemeral=True)
 
+class LyricsPageView(discord.ui.View):
+    """歌詞分頁導航"""
+    def __init__(self, title: str, pages: list[str]):
+        super().__init__(timeout=120)
+        self.title = title
+        self.pages = pages
+        self.current = 0
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.prev_btn.disabled = self.current == 0
+        self.next_btn.disabled = self.current == len(self.pages) - 1
+
+    def _embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=self.title,
+            description=self.pages[self.current],
+            color=discord.Color.purple(),
+        )
+        embed.set_footer(text=f"第 {self.current + 1} / {len(self.pages)} 頁")
+        return embed
+
+    @discord.ui.button(label="◀ 上一頁", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current -= 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self._embed(), view=self)
+
+    @discord.ui.button(label="下一頁 ▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current += 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self._embed(), view=self)
+
 class VolumeView(discord.ui.View):
     """音量控制面板"""
     def __init__(self, player: wavelink.Player):
@@ -1673,29 +1707,101 @@ class EnhancedMusic(commands.Cog):
         except ValueError:
             await ctx.send("❌ 時間格式錯誤，請使用 mm:ss 或秒數格式")
 
+    async def _fetch_lyrics(self, title: str, artist: str) -> Optional[str]:
+        """嘗試從 LRCLib 取得歌詞，失敗則改用 lyrics.ovh"""
+        import aiohttp
+        clean_title = re.sub(r'\s*[\(\[].*?[\)\]]', '', title).strip()
+
+        # ── 優先：LRCLib ──────────────────────────────────────────────
+        try:
+            async with aiohttp.ClientSession() as session:
+                params = {"track_name": clean_title, "artist_name": artist}
+                async with session.get(
+                    "https://lrclib.net/api/get",
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # 優先用純文字歌詞；沒有的話把 LRC 時間標記去掉
+                        plain = data.get("plainLyrics") or ""
+                        if not plain:
+                            synced = data.get("syncedLyrics") or ""
+                            plain = re.sub(r'\[\d+:\d+\.\d+\]', '', synced).strip()
+                        if plain:
+                            return plain
+        except Exception as e:
+            logger.debug(f"LRCLib 查詢失敗: {e}")
+
+        # ── 備用：lyrics.ovh ──────────────────────────────────────────
+        try:
+            import urllib.parse
+            enc_artist = urllib.parse.quote(artist)
+            enc_title = urllib.parse.quote(clean_title)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"https://api.lyrics.ovh/v1/{enc_artist}/{enc_title}",
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get("lyrics")
+        except Exception as e:
+            logger.debug(f"lyrics.ovh 查詢失敗: {e}")
+
+        return None
+
     @commands.hybrid_command()
     async def lyrics(self, ctx, *, query: str = None):
-        """搜索歌詞"""
+        """顯示歌詞（自動抓取正在播放的歌曲，或手動指定「歌名 歌手」）"""
+        await ctx.defer()
         player: wavelink.Player = ctx.voice_client
-        
-        if query is None:
+
+        if query:
+            parts = query.split(maxsplit=1)
+            title = parts[0]
+            artist = parts[1] if len(parts) > 1 else ""
+        else:
             if not player or not player.current:
-                await ctx.send("❌ 請提供歌曲名稱或確保有音樂正在播放")
+                await ctx.send("❌ 請提供歌曲名稱，或先播放一首歌。")
                 return
-            query = f"{player.current.title} {getattr(player.current, 'author', '')}"
-        
-        # 這裡可以整合歌詞 API，目前只是示例
-        embed = discord.Embed(
-            title="🎤 歌詞搜索",
-            description=f"正在搜索 '{query}' 的歌詞...",
-            color=discord.Color.blue()
-        )
-        embed.add_field(
-            name="提示",
-            value="歌詞功能需要整合第三方 API，目前暫未實現",
-            inline=False
-        )
-        await ctx.send(embed=embed)
+            title = player.current.title
+            artist = getattr(player.current, "author", "") or ""
+
+        text = await self._fetch_lyrics(title, artist)
+
+        if not text:
+            await ctx.send(f"❌ 找不到 **{title}** 的歌詞。")
+            return
+
+        # ── 分頁：每頁最多 3800 字元（Embed description 上限 4096）────
+        pages = []
+        lines = text.splitlines()
+        chunk = ""
+        for line in lines:
+            if len(chunk) + len(line) + 1 > 3800:
+                pages.append(chunk.strip())
+                chunk = ""
+            chunk += line + "\n"
+        if chunk.strip():
+            pages.append(chunk.strip())
+
+        total = len(pages)
+        header = f"🎤 {title}" + (f" — {artist}" if artist else "")
+
+        if total == 1:
+            embed = discord.Embed(title=header, description=pages[0], color=discord.Color.purple())
+            await ctx.send(embed=embed)
+        else:
+            # 多頁時使用帶導航按鈕的 View
+            view = LyricsPageView(header, pages)
+            embed = discord.Embed(
+                title=header,
+                description=pages[0],
+                color=discord.Color.purple(),
+            )
+            embed.set_footer(text=f"第 1 / {total} 頁")
+            await ctx.send(embed=embed, view=view)
 
     @commands.hybrid_command()
     async def playlist(self, ctx, action: str = None, *, name: str = None):
