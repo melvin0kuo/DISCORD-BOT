@@ -311,11 +311,15 @@ class LLMHandler:
             if self._http_session is None or self._http_session.closed:
                 self._http_session = aiohttp.ClientSession()
             async with self._http_session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                logger.info(f"[LM Studio] HTTP {resp.status} from {url}")
                 if resp.status != 200:
                     body = await resp.text()
                     logger.error(f"LM Studio 錯誤 {resp.status}: {body[:200]}")
                     yield f"❌ LM Studio 錯誤 ({resp.status})，請確認模型已載入。"
                     return
+                chunk_count = 0
+                think_buf = ""      # 累積 <think>...</think> 之間的內容（不輸出）
+                in_think = False
                 async for raw_line in resp.content:
                     line = raw_line.decode("utf-8", errors="ignore").strip()
                     if not line.startswith("data:"):
@@ -324,12 +328,46 @@ class LLMHandler:
                     if data_str == "[DONE]":
                         break
                     try:
-                        chunk = json.loads(data_str)
-                        delta = chunk["choices"][0].get("delta", {})
-                        if text := delta.get("content"):
-                            yield text
+                        obj = json.loads(data_str)
+                        delta = obj["choices"][0].get("delta", {})
+                        # content 優先；Qwen3 thinking mode 可能用 reasoning_content
+                        text = delta.get("content") or delta.get("reasoning_content") or ""
+                        if not text:
+                            continue
+
+                        # ── 過濾 <think>...</think> 標籤 ──────────────
+                        buf = text
+                        output = ""
+                        while buf:
+                            if in_think:
+                                end = buf.find("</think>")
+                                if end == -1:
+                                    think_buf += buf
+                                    buf = ""
+                                else:
+                                    think_buf += buf[:end]
+                                    logger.debug(f"[LM Studio] 跳過 thinking ({len(think_buf)} chars)")
+                                    think_buf = ""
+                                    in_think = False
+                                    buf = buf[end + 8:]
+                            else:
+                                start = buf.find("<think>")
+                                if start == -1:
+                                    output += buf
+                                    buf = ""
+                                else:
+                                    output += buf[:start]
+                                    in_think = True
+                                    buf = buf[start + 7:]
+
+                        if output:
+                            chunk_count += 1
+                            yield output
                     except (json.JSONDecodeError, KeyError, IndexError):
                         continue
+                logger.info(f"[LM Studio] 串流完成，共輸出 {chunk_count} 個 chunk")
+                if chunk_count == 0:
+                    logger.warning("[LM Studio] 未收到任何有效 chunk，模型可能未正確回應")
         except aiohttp.ClientConnectorError:
             logger.error("LM Studio 連線失敗，請確認 LM Studio 已開啟且端口正確")
             yield "❌ 無法連接到本機 LM Studio，請確認已開啟並載入模型。"
@@ -429,9 +467,12 @@ class LLMHandler:
 
             # ── 選擇後端 ─────────────────────────────────────────────
             use_lmstudio = self._gemini_quota_exceeded and self._lmstudio_available
+            logger.info(
+                f"[LLM] 後端選擇: {'LM Studio' if use_lmstudio else 'Gemini'} "
+                f"(quota_exceeded={self._gemini_quota_exceeded}, lmstudio_available={self._lmstudio_available})"
+            )
 
             if use_lmstudio:
-                logger.info("[LLM] 使用 LM Studio 回應")
                 stream = self._get_lmstudio_response_stream(user_id, channel_id, user_message_text, user_context_text)
             else:
                 stream = self._get_gemini_response_stream(user_id, channel_id, parts_or_message)
