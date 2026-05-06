@@ -247,7 +247,7 @@ class Conversation(commands.Cog):
         last_edit = 0.0
 
         async for chunk in stream_gen:
-            if not chunk:
+            if not chunk or not chunk.strip():
                 continue
             full_response += chunk
 

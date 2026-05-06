@@ -299,6 +299,10 @@ class LLMHandler:
             "Authorization": f"Bearer {config.LMSTUDIO_API_KEY}",
             "Content-Type": "application/json",
         }
+        # 對有 thinking 模式的模型（Qwen3、Gemma4 等）透過 API 關閉 thinking
+        # 避免 reasoning_content 佔用所有輸出、content 為空的問題
+        _model_lower = (config.LMSTUDIO_MODEL or "").lower()
+        _is_thinking_model = any(k in _model_lower for k in ("qwen3", "qwen-3", "gemma-4", "gemma4"))
         payload = {
             "model": config.LMSTUDIO_MODEL,
             "messages": messages,
@@ -306,6 +310,9 @@ class LLMHandler:
             "temperature": getattr(config, "GEMINI_TEMPERATURE", 0.7),
             "max_tokens": getattr(config, "GEMINI_MAX_OUTPUT_TOKENS", 2048),
         }
+        if _is_thinking_model:
+            payload["thinking"] = {"type": "disabled"}
+            logger.info(f"[LM Studio] 已對 {config.LMSTUDIO_MODEL} 停用 thinking 模式")
 
         try:
             if self._http_session is None or self._http_session.closed:
@@ -335,9 +342,9 @@ class LLMHandler:
                     try:
                         obj = json.loads(data_str)
                         delta = obj["choices"][0].get("delta", {})
-                        # content 優先；Qwen3 thinking mode 可能用 reasoning_content
-                        text = delta.get("content") or delta.get("reasoning_content") or ""
-                        if not text:
+                        # 只讀 content；reasoning_content 是 thinking 內部過程，不輸出給使用者
+                        text = delta.get("content") or ""
+                        if not text or not text.strip():
                             continue
 
                         # ── 過濾 <think>...</think> 標籤 ──────────────
