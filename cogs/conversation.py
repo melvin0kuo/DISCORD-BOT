@@ -134,6 +134,9 @@ class Conversation(commands.Cog):
                             if user_context:
                                 mentioned_contexts.append(f"【{user.display_name} 的資訊】{user_context}")
                     
+                    # 立即發送「思考中」，確保使用者知道機器人已收到訊息
+                    sent_message = await message.channel.send("💬 思考中...")
+
                     # 獲取發送訊息用戶的完整上下文（個人資料、標籤、記憶等）
                     logger.info("正在獲取用戶完整上下文...")
                     user_context = self.llm_handler.get_user_full_context(str(message.author.id), channel_id)
@@ -190,6 +193,7 @@ class Conversation(commands.Cog):
                     response_text = await self._stream_with_pagination(
                         message.channel,
                         self.llm_handler.get_llm_response_stream(str(message.author.id), channel_id, parts),
+                        initial_msg=sent_message,
                     )
                     logger.info(f"LLM 回應生成完成，長度: {len(response_text)}")
 
@@ -217,7 +221,9 @@ class Conversation(commands.Cog):
                                 "response_length": len(response_text)
                             }
                         )
+                    else:
                         logger.warning("對話處理完成，但沒有生成回應")
+                        await sent_message.edit(content="❌ 抱歉，我無法生成回應。請稍後再試。")
                 except Exception as e:
                     logger.error(f"生成回應時出錯: {e}", exc_info=True)
                     try:
@@ -232,10 +238,10 @@ class Conversation(commands.Cog):
             if message_key and message_key in self.processing_messages:
                 self.processing_messages.remove(message_key)
 
-    async def _stream_with_pagination(self, channel, stream_gen) -> str:
+    async def _stream_with_pagination(self, channel, stream_gen, initial_msg=None) -> str:
         """串流 LLM 回應並自動分頁（Discord 單則訊息上限 2000 字元）"""
         LIMIT = 1900  # 留緩衝避免邊界錯誤
-        sent_msg = await channel.send("💬 思考中...")
+        sent_msg = initial_msg or await channel.send("💬 思考中...")
         current_page = ""
         full_response = ""
         last_edit = 0.0
