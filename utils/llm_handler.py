@@ -289,7 +289,11 @@ class LLMHandler:
         for h in history[:-1]:  # history[-1] 是剛加入的當前訊息，改用 message 參數傳入
             role = "user" if h["role"] == "user" else "assistant"
             messages.append({"role": role, "content": h["content"]})
-        messages.append({"role": "user", "content": message})
+
+        # Qwen3 預設開啟 thinking 模式，加上 /no_think 停用以加快回應速度
+        model_name = (config.LMSTUDIO_MODEL or "").lower()
+        user_msg = f"/no_think\n{message}" if "qwen" in model_name else message
+        messages.append({"role": "user", "content": user_msg})
 
         headers = {
             "Authorization": f"Bearer {config.LMSTUDIO_API_KEY}",
