@@ -64,7 +64,7 @@ LOCAL_MODEL_TEMPERATURE = float(os.getenv('LOCAL_MODEL_TEMPERATURE', 0.7))
 LOCAL_MODEL_TOP_P = float(os.getenv('LOCAL_MODEL_TOP_P', 0.9))
 
 # 本地 Python LLM 設定
-MAX_HISTORY_LENGTH = int(os.getenv('MAX_HISTORY_LENGTH', 10))
+MAX_HISTORY_LENGTH = int(os.getenv('MAX_HISTORY_LENGTH', 15))
 
 # LLM 系統提示詞
 LLM_SYSTEM_PROMPT = os.getenv('LLM_SYSTEM_PROMPT',

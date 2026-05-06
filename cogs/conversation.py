@@ -241,6 +241,7 @@ class Conversation(commands.Cog):
     async def _stream_with_pagination(self, channel, stream_gen, initial_msg=None) -> str:
         """串流 LLM 回應並自動分頁（Discord 單則訊息上限 2000 字元）"""
         LIMIT = 1900  # 留緩衝避免邊界錯誤
+        _AM = discord.AllowedMentions(users=True, roles=False, everyone=False)
         sent_msg = initial_msg or await channel.send("💬 思考中...")
         current_page = ""
         full_response = ""
@@ -255,15 +256,15 @@ class Conversation(commands.Cog):
             while len(chunk) > LIMIT:
                 piece, chunk = chunk[:LIMIT], chunk[LIMIT:]
                 if current_page:
-                    await sent_msg.edit(content=current_page)
-                sent_msg = await channel.send(piece)
+                    await sent_msg.edit(content=current_page, allowed_mentions=_AM)
+                sent_msg = await channel.send(piece, allowed_mentions=_AM)
                 current_page = piece
                 last_edit = time.monotonic()
 
             if len(current_page) + len(chunk) > LIMIT:
                 # 當前頁已滿：定稿並開新訊息
-                await sent_msg.edit(content=current_page)
-                sent_msg = await channel.send(chunk)
+                await sent_msg.edit(content=current_page, allowed_mentions=_AM)
+                sent_msg = await channel.send(chunk, allowed_mentions=_AM)
                 current_page = chunk
                 last_edit = time.monotonic()
             else:
@@ -271,13 +272,13 @@ class Conversation(commands.Cog):
                 now = time.monotonic()
                 if now - last_edit >= 0.8:
                     try:
-                        await sent_msg.edit(content=current_page)
+                        await sent_msg.edit(content=current_page, allowed_mentions=_AM)
                         last_edit = now
                     except Exception:
                         pass
 
         if current_page:
-            await sent_msg.edit(content=current_page)
+            await sent_msg.edit(content=current_page, allowed_mentions=_AM)
 
         return full_response
 
