@@ -318,6 +318,7 @@ class LLMHandler:
                     yield f"❌ LM Studio 錯誤 ({resp.status})，請確認模型已載入。"
                     return
                 chunk_count = 0
+                raw_count = 0
                 think_buf = ""      # 累積 <think>...</think> 之間的內容（不輸出）
                 in_think = False
                 async for raw_line in resp.content:
@@ -327,6 +328,10 @@ class LLMHandler:
                     data_str = line[5:].strip()
                     if data_str == "[DONE]":
                         break
+                    # 前 5 個 SSE 事件記錄原始內容，方便診斷格式問題
+                    if raw_count < 5:
+                        logger.warning(f"[LM Studio RAW #{raw_count}] {data_str[:200]}")
+                    raw_count += 1
                     try:
                         obj = json.loads(data_str)
                         delta = obj["choices"][0].get("delta", {})
