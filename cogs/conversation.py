@@ -167,7 +167,7 @@ class Conversation(commands.Cog):
                     # 4. 頻道最近 20 條訊息（讓 LLM 掌握當前對話脈絡）
                     try:
                         history_lines = []
-                        async for msg in message.channel.history(limit=20, before=message):
+                        async for msg in message.channel.history(limit=5, before=message):
                             if msg.content.startswith(config.PREFIX):
                                 continue
                             text = msg.content or "(附件或嵌入內容)"
