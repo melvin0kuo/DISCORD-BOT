@@ -1,7 +1,7 @@
 # 呱呱 Discord Bot
 
 > 由 [melvin0kuo](https://github.com/melvin0kuo) 開發的多功能 Discord 機器人
-> **discord.py 2.7** · **Lavalink 4.2** · **Gemini 2.0 Flash**
+> **discord.py 2.7** · **Lavalink 4.2** · **LM Studio / Gemini**
 
 ---
 
@@ -9,7 +9,7 @@
 
 | 模組 | 功能 |
 |------|------|
-| 🤖 **AI 對話** | Gemini 2.0 Flash 驅動，DM / 提及 / 回覆皆可觸發，含 prompt injection 防護 |
+| 🤖 **AI 對話** | LM Studio 本機模型或 Gemini，DM / 提及 / 回覆皆可觸發，含 prompt injection 防護 |
 | 🎵 **音樂播放** | YouTube · SoundCloud · Bandcamp；循環、隨機、歷史；本機 Lavalink |
 | 🧠 **對話記憶** | SQLite 持久化每位用戶的對話歷史、摘要與主題洞察 |
 | 👤 **用戶管理** | 個人資料、標籤系統、互動記錄 |
@@ -93,9 +93,34 @@ python -m ruff check main.py config.py cogs utils tests --select F821,F823,E9
 自動測試使用暫存資料庫與本機測試伺服器，不需要 Discord Token、Gemini API 或正在運行的 Lavalink。
 根目錄與 `test/` 中的舊診斷腳本需要模型或外部服務，不屬於自動測試套件。
 
-LM Studio 可使用未啟用驗證的本機伺服器；設定 `DEFAULT_LLM_TYPE=local`、
-`LMSTUDIO_API_URL=http://localhost:1234` 及 `LMSTUDIO_MODEL` 即可。
-啟用驗證時另設定 `LMSTUDIO_API_KEY`。動態載入模型使用 LM Studio 原生 v1 管理 API。
+### 本機聊天與語義點歌（LM Studio）
+
+安裝 [LM Studio](https://lmstudio.ai/download) 並開啟一次，再用 PowerShell 下載模型：
+
+```powershell
+& "$env:USERPROFILE\.lmstudio\bin\lms.exe" get qwen/qwen3.5-9b --gguf --yes
+```
+
+在 `.env` 設定：
+
+```env
+DEFAULT_LLM_TYPE=local
+ENABLE_FALLBACK=false
+LMSTUDIO_API_URL=http://127.0.0.1:1234
+LMSTUDIO_MODEL=discord-local
+LMSTUDIO_MODEL_KEY=qwen/qwen3.5-9b
+LMSTUDIO_CONTEXT_LENGTH=8192
+LMSTUDIO_ENABLE_THINKING=false
+```
+
+`LMSTUDIO_MODEL_KEY` 是已下載的模型名稱；`LMSTUDIO_MODEL` 是提供給機器人的固定 API 識別名稱。
+可依硬體改用其他支援工具呼叫的模型。本機部署已實測 Qwen3.6 27B Q6_K、8192 context，使用 RTX 5090 32GB。
+啟用 API 驗證時，另將 LM Studio 的 Token 填入 `LMSTUDIO_API_KEY`，不要提交 `.env`。
+
+執行 `start_with_lavalink.bat` 會啟動本機 API、載入模型並啟動音樂服務與機器人；
+若模型已載入會直接沿用。API 僅監聽 `127.0.0.1:1234`。
+本機聊天與語義理解不消耗 Gemini 額度；網路搜尋及線上音樂來源仍需要網路。
+預設停用模型思考以降低聊天延遲，使用 LM Studio 0.4.8 以上支援的 `reasoning_effort` 參數。
 
 ### 3. 建立 `.env`
 

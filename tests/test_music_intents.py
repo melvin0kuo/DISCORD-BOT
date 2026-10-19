@@ -339,6 +339,7 @@ def test_lmstudio_music_tool_round_trip(handler, monkeypatch):
         async def chat(request):
             body = await request.json()
             requests.append(body)
+            assert body.get('reasoning_effort') == 'none'
             assert 'control_music' in [tool['function']['name'] for tool in body['tools']]
             if len(requests) == 1:
                 delta = {'tool_calls': [{'index': 0, 'id': 'music-1', 'type': 'function', 'function': {

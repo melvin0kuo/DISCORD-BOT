@@ -63,7 +63,7 @@ class LLMHandler:
     def __init__(self, bot_name: str):
         self.bot_name = bot_name
         self.current_llm_type = "gemini"
-        logger.info(f"LLMHandler 啟動，使用 Gemini API")
+        logger.info('LLMHandler 啟動，設定後端: %s', config.DEFAULT_LLM_TYPE)
         self.system_prompt = config.LLM_SYSTEM_PROMPT.replace('{bot_name}', bot_name)
         # 用戶 ID -> 頻道 ID -> 對話歷史
         self.conversation_history = {}
@@ -261,8 +261,7 @@ class LLMHandler:
 
         # 檢查是否啟用思考模式 (從環境變數或 config 讀取)
         _thinking_enabled = os.getenv("LMSTUDIO_ENABLE_THINKING", "false").lower() == "true"
-        if "thinking" not in payload:
-            payload["thinking"] = {"type": "enabled" if _thinking_enabled else "disabled"}
+        payload.setdefault('reasoning_effort', 'medium' if _thinking_enabled else 'none')
 
         if self._http_session is None or self._http_session.closed:
             self._http_session = aiohttp.ClientSession()

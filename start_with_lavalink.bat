@@ -10,6 +10,8 @@ if not defined BOT_PYTHON set "BOT_PYTHON=python"
 
 "%BOT_PYTHON%" setup_local_lavalink.py
 if errorlevel 1 goto failed
+"%BOT_PYTHON%" setup_local_lmstudio.py
+if errorlevel 1 goto failed
 if /I "%~1"=="--setup-only" (
     set "BOT_EXIT=0"
     goto done
@@ -19,7 +21,7 @@ set "BOT_EXIT=%ERRORLEVEL%"
 goto done
 
 :failed
-echo Local Lavalink setup failed. See the error above.
+echo Local service setup failed. See the error above.
 set "BOT_EXIT=1"
 
 :done
