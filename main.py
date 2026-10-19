@@ -627,6 +627,11 @@ async def main():
             logger.error("❌ Discord TOKEN 未設定，請檢查配置")
             return
         
+        from utils.youtube_runtime import local_cipher
+        if config.YOUTUBE_CIPHER_ENABLED:
+            if not await local_cipher.ensure_started():
+                logger.warning('YouTube cipher 未就緒，音源失敗時將嘗試 yt-dlp 備援')
+
         # 載入擴展
         await load_extensions()
 
@@ -677,6 +682,8 @@ async def main():
 
         from utils.local_lavalink import local_lavalink
         await local_lavalink.close()
+        from utils.youtube_runtime import local_cipher
+        await local_cipher.close()
         
         logger.info("🔚 所有資源清理完成")
 

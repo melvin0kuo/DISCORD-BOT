@@ -18,6 +18,8 @@ PREFIX = '!'
 LAVALINK_URI = os.getenv('LAVALINK_URI', 'http://127.0.0.1:2333')
 LAVALINK_PASSWORD = os.getenv('LAVALINK_PASSWORD', 'youshallnotpass')
 LAVALINK_CONNECT_TIMEOUT = float(os.getenv('LAVALINK_CONNECT_TIMEOUT', '10'))
+YOUTUBE_CIPHER_ENABLED = os.getenv('YOUTUBE_CIPHER_ENABLED', 'True').lower() == 'true'
+YOUTUBE_FALLBACK_ENABLED = os.getenv('YOUTUBE_FALLBACK_ENABLED', 'True').lower() == 'true'
 
 # 圖片生成 API 設定
 IMAGE_API_KEY = os.getenv('IMAGE_API_KEY')

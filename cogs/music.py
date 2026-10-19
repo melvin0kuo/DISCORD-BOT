@@ -14,6 +14,7 @@ import importlib
 import config
 from utils.local_lavalink import local_lavalink
 from utils.music_player import VoicePlayer
+from utils.youtube_fallback import resolve_youtube_fallback
 
 # 添加 Wavelink 異常處理
 from wavelink.exceptions import LavalinkException
@@ -135,6 +136,7 @@ class MusicControlView(discord.ui.View):
         """停止按鈕"""
         queue = self.music_cog.get_queue(interaction.guild.id)
         queue.clear()
+        self.music_cog._cancel_pending_playback(interaction.guild.id)
         try:
             await self.player.stop()
             await interaction.response.send_message("⏹️ 已停止播放並清空佇列", ephemeral=True)
@@ -369,6 +371,9 @@ class EnhancedMusic(commands.Cog):
         self._playback_blocked = set()
         self._track_end_locks = {}
         self._voice_locks = {}
+        self._playback_generation = {}
+        self._fallback_attempts = {}
+        self._playback_active = {}
         self.ensure_data_dir()
         self.load_playlists()
         self.load_autoplay_config()
@@ -407,6 +412,7 @@ class EnhancedMusic(commands.Cog):
 
             elif before.channel and not after.channel:
                 # 離開語音頻道
+                self._cancel_pending_playback(guild_id)
                 for node_id, node in wavelink.Pool.nodes.items():
                     logger.info(
                         f"[語音狀態] node={node_id} status={node.status} "
@@ -701,22 +707,83 @@ class EnhancedMusic(commands.Cog):
         self._playback_blocked.add(guild_id)
         channel = getattr(player, 'last_channel', None)
         if channel:
-            title = getattr(track, 'title', '這首歌曲')
-            await channel.send(f'❌ 無法讀取「{title}」的音訊，已停止自動接播。音源可能要求登入或暫時不可用；請改用其他音源或重新點歌。')
+            generation = self._playback_generation.get(guild_id, 0)
+            extras = dict(getattr(track, 'extras', {}))
+            title = extras.get('_original_title') or getattr(track, 'title', '這首歌曲')
+            notice = f'❌ 無法讀取「{title}」的音訊，已停止自動接播。音源可能要求登入或暫時不可用；請改用其他音源或重新點歌。'
+            if getattr(track, 'source', None) == 'youtube' or extras.get('_youtube_fallback'):
+                try:
+                    candidates = await asyncio.wait_for(wavelink.Playable.search(
+                        f"{title} {extras.get('_original_author') or getattr(track, 'author', '')}",
+                        source=wavelink.TrackSource.SoundCloud), timeout=5)
+                    choices = [f'{index}. {candidate.title}: {candidate.uri}'
+                               for index, candidate in enumerate(candidates[:3], 1)]
+                    if choices:
+                        notice += '\n\n其他音源候選（版本可能不同，請自行選擇並使用 `/play 網址`）：\n' + '\n'.join(choices)
+                except Exception:
+                    logger.info('未能取得其他音源候選')
+            if self._playback_generation.get(guild_id, 0) == generation:
+                await channel.send(notice, allowed_mentions=discord.AllowedMentions.none())
+
+    def _cancel_pending_playback(self, guild_id):
+        self._playback_generation[guild_id] = self._playback_generation.get(guild_id, 0) + 1
+        self._playback_active.pop(guild_id, None)
+
+    def _is_current_track_event(self, guild_id, track):
+        generation = self._playback_generation.get(guild_id, 0)
+        extras = dict(getattr(track, 'extras', {}))
+        if extras.get('_request_generation', generation) != generation:
+            return False
+        active = self._playback_active.get(guild_id)
+        if active is None:
+            return guild_id not in self._playback_generation
+        return active == (generation, getattr(track, 'encoded', None))
+
+    async def _handle_track_failure(self, player, track):
+        guild_id = player.guild.id
+        if not self._is_current_track_event(guild_id, track):
+            return
+        generation = self._playback_generation.get(guild_id, 0)
+        key = (generation, getattr(track, 'encoded', None))
+        if self._fallback_attempts.get(guild_id) == key:
+            return  # exception 與 loadFailed 是同一輪失敗，不重複擷取或報錯。
+        if (guild_id not in self._playback_blocked and getattr(track, 'source', None) == 'youtube'
+                and getattr(config, 'YOUTUBE_FALLBACK_ENABLED', True)):
+            self._fallback_attempts[guild_id] = key
+            try:
+                fallback = await resolve_youtube_fallback(track)
+                if self._playback_generation.get(guild_id, 0) != generation or not getattr(player, 'connected', True):
+                    return
+                fallback.extras = {**dict(getattr(fallback, 'extras', {})), '_request_generation': generation}
+                self._playback_active[guild_id] = (generation, fallback.encoded)
+                await player.play(fallback)
+                logger.info('已切換原歌曲的 yt-dlp 音訊備援: %s', track.title)
+                return
+            except Exception as error:
+                logger.warning('YouTube 音訊備援失敗: %s', type(error).__name__)
+                if self._playback_generation.get(guild_id, 0) != generation:
+                    return
+        await self._halt_failed_playback(player, track)
 
     @commands.Cog.listener()
     async def on_wavelink_track_exception(self, payload):
         if not payload.player or not payload.player.guild:
             return
         logger.error('[Track exception] guild=%s | error=%s', payload.player.guild.id, payload.exception)
-        await self._halt_failed_playback(payload.player, payload.track)
+        await self._handle_track_failure(payload.player, payload.track)
 
     @commands.Cog.listener()
     async def on_wavelink_track_stuck(self, payload):
         if not payload.player or not payload.player.guild:
             return
+        guild_id = payload.player.guild.id
+        if not self._is_current_track_event(guild_id, payload.track):
+            return
+        generation = self._playback_generation.get(guild_id, 0)
         await self._halt_failed_playback(payload.player, payload.track)
-        await payload.player.stop()
+        if (self._playback_generation.get(guild_id, 0) == generation
+                and self._is_current_track_event(guild_id, payload.track)):
+            await payload.player.stop()
 
     @commands.Cog.listener()
     async def on_wavelink_track_start(self, payload):
@@ -724,7 +791,8 @@ class EnhancedMusic(commands.Cog):
             return
         player = payload.player
         await asyncio.sleep(0.5)
-        if (player.guild.id not in self._playback_blocked and player.current == payload.track
+        if (self._is_current_track_event(player.guild.id, payload.track)
+                and player.guild.id not in self._playback_blocked and player.current == payload.track
                 and getattr(player, 'last_channel', None)):
             await player.last_channel.send(embed=self.create_now_playing_embed(player, player.guild.id),
                                            view=MusicControlView(player, self))
@@ -734,6 +802,10 @@ class EnhancedMusic(commands.Cog):
             self._playback_blocked.discard(player.guild.id)
         elif player.guild.id in self._playback_blocked:
             return False
+        self._cancel_pending_playback(player.guild.id)
+        generation = self._playback_generation[player.guild.id]
+        track.extras = {**dict(getattr(track, 'extras', {})), '_request_generation': generation}
+        self._playback_active[player.guild.id] = (generation, getattr(track, 'encoded', None))
         await player.play(track)
         return True
 
@@ -743,9 +815,11 @@ class EnhancedMusic(commands.Cog):
             return
         player = payload.player
         guild_id = player.guild.id
+        if not self._is_current_track_event(guild_id, payload.track):
+            return
         reason = str(payload.reason).lower()
         if reason in ('loadfailed', 'load_failed'):
-            await self._halt_failed_playback(player, payload.track)
+            await self._handle_track_failure(player, payload.track)
             return
         if reason not in ('finished', 'stopped') or guild_id in self._playback_blocked:
             return
@@ -1358,6 +1432,7 @@ class EnhancedMusic(commands.Cog):
 
         queue = self.get_queue(ctx.guild.id)
         queue.clear()
+        self._cancel_pending_playback(ctx.guild.id)
         self._user_stopped.add(ctx.guild.id)   # 標記為使用者主動停止，避免快速斷線誤判
 
         try:
@@ -1380,6 +1455,7 @@ class EnhancedMusic(commands.Cog):
 
         queue = self.get_queue(ctx.guild.id)
         queue.clear()
+        self._cancel_pending_playback(ctx.guild.id)
         self._user_stopped.add(ctx.guild.id)
 
         try:
