@@ -13,6 +13,7 @@ import os
 import importlib
 import config
 from utils.local_lavalink import local_lavalink
+from utils.music_player import VoicePlayer
 
 # 添加 Wavelink 異常處理
 from wavelink.exceptions import LavalinkException
@@ -365,6 +366,9 @@ class EnhancedMusic(commands.Cog):
         self._connect_lock = asyncio.Lock()  # 防止 connect_to_lavalink 被同時呼叫兩次
         self._voice_connect_times: dict = {}   # guild_id -> timestamp，用於偵測快速斷線
         self._user_stopped: set = set()        # guild_id，記錄是使用者主動停止的
+        self._playback_blocked = set()
+        self._track_end_locks = {}
+        self._voice_locks = {}
         self.ensure_data_dir()
         self.load_playlists()
         self.load_autoplay_config()
@@ -416,20 +420,9 @@ class EnhancedMusic(commands.Cog):
                 elapsed = time.time() - join_time if join_time else 999
 
                 if not user_stopped and join_time and elapsed < 10:
-                    # 快速斷線 (< 10 秒) 且非使用者主動停止
-                    # → Lavalink 伺服器無法連接 Discord 語音
-                    logger.warning(
-                        f"⚡ 快速斷線偵測 (guild={guild_id}, elapsed={elapsed:.1f}s) "
-                        f"→ 目前 Lavalink 伺服器無法連接 Discord 語音，嘗試切換..."
-                    )
-                    if lavalink_manager and lavalink_manager.current_server:
-                        lavalink_manager.current_server.status = "voice_fail"
-                        lavalink_manager.current_server.error_count += 5
-                    asyncio.create_task(self.switch_lavalink_server())
-                else:
-                    if guild_id in self.queues:
-                        self.queues[guild_id].clear()
-                        logger.info(f"🔧 已清理伺服器 {guild_id} 的音樂佇列")
+                    logger.warning(f'語音連線提前中斷 (guild={guild_id}, elapsed={elapsed:.1f}s)，保留本機節點')
+                if guild_id in self.queues:
+                    self.queues[guild_id].clear()
 
         except Exception as e:
             logger.error(f"❌ 處理語音狀態更新時出錯: {e}", exc_info=True)
@@ -700,184 +693,79 @@ class EnhancedMusic(commands.Cog):
             f"channel={getattr(player, 'channel', None)}"
         )
 
-    @commands.Cog.listener()
-    async def on_wavelink_track_exception(self, payload: wavelink.TrackExceptionEventPayload):
-        logger.error(
-            f"[Track exception] guild={payload.player.guild.id} | "
-            f"track={payload.track.title if payload.track else '?'} | "
-            f"error={payload.exception}"
-        )
+    async def _halt_failed_playback(self, player, track=None):
+        guild_id = player.guild.id
+        player.autoplay = wavelink.AutoPlayMode.disabled
+        if guild_id in self._playback_blocked:
+            return
+        self._playback_blocked.add(guild_id)
+        channel = getattr(player, 'last_channel', None)
+        if channel:
+            title = getattr(track, 'title', '這首歌曲')
+            await channel.send(f'❌ 無法讀取「{title}」的音訊，已停止自動接播。音源可能要求登入或暫時不可用；請改用其他音源或重新點歌。')
 
     @commands.Cog.listener()
-    async def on_wavelink_track_stuck(self, payload: wavelink.TrackStuckEventPayload):
-        logger.warning(
-            f"[Track stuck] guild={payload.player.guild.id} | "
-            f"track={payload.track.title if payload.track else '?'} | "
-            f"threshold={payload.threshold}ms"
-        )
+    async def on_wavelink_track_exception(self, payload):
+        if not payload.player or not payload.player.guild:
+            return
+        logger.error('[Track exception] guild=%s | error=%s', payload.player.guild.id, payload.exception)
+        await self._halt_failed_playback(payload.player, payload.track)
 
     @commands.Cog.listener()
-    async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload):
-        """當音軌結束時自動播放下一首（改進穩定性）"""
-        try:
-            player = payload.player
-            guild_id = player.guild.id
+    async def on_wavelink_track_stuck(self, payload):
+        if not payload.player or not payload.player.guild:
+            return
+        await self._halt_failed_playback(payload.player, payload.track)
+        await payload.player.stop()
+
+    @commands.Cog.listener()
+    async def on_wavelink_track_start(self, payload):
+        if not payload.player or not payload.player.guild:
+            return
+        player = payload.player
+        await asyncio.sleep(0.5)
+        if (player.guild.id not in self._playback_blocked and player.current == payload.track
+                and getattr(player, 'last_channel', None)):
+            await player.last_channel.send(embed=self.create_now_playing_embed(player, player.guild.id),
+                                           view=MusicControlView(player, self))
+
+    async def _play_track(self, player, track, *, manual=False):
+        if manual:
+            self._playback_blocked.discard(player.guild.id)
+        elif player.guild.id in self._playback_blocked:
+            return False
+        await player.play(track)
+        return True
+
+    @commands.Cog.listener()
+    async def on_wavelink_track_end(self, payload):
+        if not payload.player or not payload.player.guild:
+            return
+        player = payload.player
+        guild_id = player.guild.id
+        reason = str(payload.reason).lower()
+        if reason in ('loadfailed', 'load_failed'):
+            await self._halt_failed_playback(player, payload.track)
+            return
+        if reason not in ('finished', 'stopped') or guild_id in self._playback_blocked:
+            return
+        lock = self._track_end_locks.setdefault(guild_id, asyncio.Lock())
+        async with lock:
+            if player.current is not None or guild_id in self._playback_blocked:
+                return
             queue = self.get_queue(guild_id)
-            
-            logger.info(f"🎵 音軌結束事件觸發 - 原因: {payload.reason} | 伺服器: {guild_id}")
-            logger.info(f"📊 當前佇列狀態: {len(queue.queue)} 首歌曲 | 自動播放: {self.autoplay_enabled.get(guild_id, False)}")
-            
-            # 防止重複處理：檢查播放器狀態
-            if not player or player.guild.id != guild_id:
-                logger.warning("⚠️ 播放器狀態異常，跳過處理")
-                return
-            
-            # 處理各種結束原因（wavelink 3.x reason 為小寫字串）
-            should_auto_play = False
-            reason = str(payload.reason).lower()
-
-            if reason == "finished":
-                logger.info("✅ 音軌正常播放完畢，處理自動播放...")
-                should_auto_play = True
-            elif reason == "stopped":
-                logger.info("⏹️ 音軌被手動停止，檢查是否為跳過操作...")
-                should_auto_play = len(queue.queue) > 0
-            elif reason == "replaced":
-                logger.info("🔄 音軌被替換，跳過自動播放")
-                return
-            elif reason in ("loadfailed", "load_failed"):
-                logger.warning("❌ 音軌載入失敗，嘗試播放下一首")
-                should_auto_play = True
-            elif reason == "cleanup":
-                logger.info("🧹 播放器清理，跳過自動播放")
-                return
-            else:
-                logger.info(f"❓ 其他結束原因: {payload.reason}，嘗試自動播放")
-                should_auto_play = True
-            
-            if not should_auto_play:
-                logger.info("🚫 不符合自動播放條件，結束處理")
-                return
-            
-            # 添加小延遲避免競爭條件
-            await asyncio.sleep(0.1)
-            
-            # 再次檢查播放器狀態
-            if player.current is not None:
-                logger.info("🎵 播放器已在播放其他音樂，跳過自動播放")
-                return
-            
-            # 獲取下一首歌曲
-            next_track = queue.get_next()
-            logger.info(f"📋 獲取下一首歌曲: {next_track.title if next_track else '無'}")
-            logger.info(f"🔁 循環模式: {queue.loop_mode} | 佇列剩餘: {len(queue.queue)} 首")
-            
-            # 檢查自動播放狀態 - 使用新的方法
-            autoplay_status = self.get_autoplay_status(guild_id)
-            logger.info(f"🤖 自動播放狀態: {'啟用' if autoplay_status else '停用'} | 伺服器: {guild_id}")
-            
-            # 如果沒有下一首歌曲且啟用自動播放，則添加推薦歌曲
-            autoplay_attempts = 0
-            max_autoplay_attempts = 3
-            
-            while not next_track and autoplay_status and autoplay_attempts < max_autoplay_attempts:
-                autoplay_attempts += 1
-                logger.info(f"🤖 自動播放嘗試 {autoplay_attempts}/{max_autoplay_attempts}：正在搜尋推薦歌曲...")
-                
-                try:
-                    await self.auto_recommend_and_play(player)
-                    # 重新獲取下一首歌曲
-                    next_track = queue.get_next()
-                    logger.info(f"🎯 自動播放嘗試 {autoplay_attempts} 結果: {next_track.title if next_track else '無'}")
-                    
-                    if next_track:
-                        break
-                        
-                    # 如果第一次失敗，等待後重試
-                    if autoplay_attempts < max_autoplay_attempts:
-                        await asyncio.sleep(1)
-                        
-                except Exception as e:
-                    logger.error(f"❌ 自動播放嘗試 {autoplay_attempts} 失敗: {e}")
-                    await asyncio.sleep(1)
-            
-            # 播放下一首歌曲
-            if next_track:
-                logger.info(f"▶️ 準備播放下一首: {next_track.title}")
-                
-                # 最後一次檢查播放器狀態
-                if player.current is not None:
-                    logger.warning("⚠️ 播放器狀態變更，已有其他音樂在播放")
-                    # 將歌曲重新加入佇列前面
-                    queue.queue.insert(0, next_track)
+            next_track = queue.get_next() if reason == 'finished' or queue.queue else None
+            if not next_track and reason == 'finished' and self.get_autoplay_status(guild_id):
+                await self.auto_recommend_and_play(player)
+                if guild_id in self._playback_blocked or player.current is not None:
                     return
-                
+                next_track = queue.get_next()
+            if next_track:
                 try:
-                    await player.play(next_track)
-                    # get_next() 已經將歌曲添加到歷史記錄，這裡不需要重複添加
-                    logger.info(f"✅ 成功開始播放: {next_track.title}")
-                    
-                    # 發送正在播放的消息到最後一個使用音樂命令的頻道
-                    if hasattr(player, 'last_channel') and player.last_channel:
-                        try:
-                            # 短暫延遲確保播放狀態穩定
-                            await asyncio.sleep(0.5)
-                            embed = self.create_now_playing_embed(player, guild_id)
-                            view = MusicControlView(player, self)
-                            await player.last_channel.send(embed=embed, view=view)
-                            logger.info("📢 已發送正在播放訊息")
-                        except Exception as e:
-                            logger.warning(f"⚠️ 發送正在播放訊息失敗: {e}")
-                            
-                except Exception as e:
-                    logger.error(f"❌ 播放下一首歌曲失敗: {e}")
-                    # 如果播放失敗，將歌曲重新加入佇列前面
-                    queue.queue.insert(0, next_track)
-                    if hasattr(player, 'last_channel') and player.last_channel:
-                        try:
-                            await player.last_channel.send(f"❌ 播放 **{next_track.title}** 失敗，已重新加入佇列")
-                        except:
-                            pass
-            else:
-                logger.info("🔚 佇列播放完畢，沒有更多歌曲")
-                if hasattr(player, 'last_channel') and player.last_channel:
-                    try:
-                        embed = discord.Embed(
-                            title="🔚 播放完畢",
-                            description="佇列中的所有歌曲都已播放完畢",
-                            color=discord.Color.orange()
-                        )
-                        if self.get_autoplay_status(guild_id):
-                            if autoplay_attempts > 0:
-                                embed.add_field(
-                                    name="🤖 自動播放",
-                                    value=f"已嘗試 {autoplay_attempts} 次推薦歌曲，但無法找到適合的音樂",
-                                    inline=False
-                                )
-                            else:
-                                embed.add_field(
-                                    name="💡 提示",
-                                    value="自動播放已啟用，但目前沒有播放歷史可用於推薦",
-                                    inline=False
-                                )
-                        await player.last_channel.send(embed=embed)
-                    except Exception as e:
-                        logger.warning(f"⚠️ 發送播放完畢訊息失敗: {e}")
-                        
-        except Exception as e:
-            logger.error(f"❌ 處理音軌結束事件時出錯: {e}", exc_info=True)
-            # 嘗試恢復播放狀態
-            try:
-                if 'player' in locals() and 'guild_id' in locals():
-                    queue = self.get_queue(guild_id)
-                    if queue.queue and not player.current:
-                        logger.info("🔄 嘗試恢復播放狀態...")
-                        next_track = queue.get_next()
-                        if next_track:
-                            await player.play(next_track)
-                            logger.info("✅ 播放狀態恢復成功")
-            except Exception as recovery_error:
-                logger.error(f"❌ 播放狀態恢復失敗: {recovery_error}")
+                    await self._play_track(player, next_track)
+                except Exception:
+                    logger.exception('播放下一首失敗')
+                    await self._halt_failed_playback(player, next_track)
 
     def _extract_youtube_id(self, uri: str) -> Optional[str]:
         """從 YouTube URL 或 identifier 提取 video ID"""
@@ -984,35 +872,6 @@ class EnhancedMusic(commands.Cog):
                 queue.add(recommended_track)
                 logger.info(f"📋 已將推薦歌曲加入佇列: {recommended_track.title}")
                 
-                # 發送推薦通知（非阻塞）
-                if hasattr(player, 'last_channel') and player.last_channel:
-                    try:
-                        # 根據推薦來源顯示不同訊息
-                        if queue.history:
-                            base_track = queue.history[-1]
-                            description = f"基於「**{base_track.title}**」為你推薦: **{recommended_track.title}**"
-                        else:
-                            description = f"為你推薦熱門音樂: **{recommended_track.title}**"
-                        
-                        embed = discord.Embed(
-                            title="🤖 自動播放推薦",
-                            description=description,
-                            color=discord.Color.purple()
-                        )
-                        
-                        if hasattr(recommended_track, 'author') and recommended_track.author:
-                            embed.add_field(name="👤 作者", value=recommended_track.author, inline=True)
-                        
-                        if hasattr(recommended_track, 'length'):
-                            duration = self.format_duration(recommended_track.length)
-                            embed.add_field(name="⏱️ 長度", value=duration, inline=True)
-                        
-                        # 非同步發送，避免阻塞
-                        asyncio.create_task(player.last_channel.send(embed=embed))
-                        
-                    except Exception as e:
-                        logger.warning(f"⚠️ 發送推薦通知失敗: {e}")
-                
                 return True
             else:
                 logger.warning("❌ 所有推薦策略都失敗了")
@@ -1022,119 +881,52 @@ class EnhancedMusic(commands.Cog):
             logger.error(f"❌ 自動播放推薦失敗: {e}", exc_info=True)
             return False
 
+    async def _connect_voice(self, guild, channel, text_channel):
+        lock = self._voice_locks.setdefault(guild.id, asyncio.Lock())
+        async with lock:
+            current = guild.voice_client
+            if current and getattr(current, 'connected', False):
+                if current.channel != channel:
+                    raise RuntimeError('機器人已在其他語音頻道服務')
+                current.last_channel = text_channel
+                return current
+            if not any(node.status == wavelink.NodeStatus.CONNECTED for node in wavelink.Pool.nodes.values()):
+                if not await self.connect_to_lavalink():
+                    raise RuntimeError('本機音樂服務尚未就緒')
+            for attempt in range(2):
+                try:
+                    logger.info('語音連線嘗試 #%s: %s', attempt + 1, channel.name)
+                    player = await channel.connect(cls=VoicePlayer, self_deaf=True, timeout=30.0)
+                    player.last_channel = text_channel
+                    return player
+                except (wavelink.ChannelTimeoutException, discord.ClientException):
+                    stale = guild.voice_client
+                    if stale:
+                        await stale.disconnect(force=True)
+                    else:
+                        await guild.change_voice_state(channel=None)
+                    if attempt == 1:
+                        raise
+                    await asyncio.sleep(1)
+
     @commands.hybrid_command()
     async def join(self, ctx):
         """讓機器人加入語音頻道"""
         await ctx.defer()
-
         if not ctx.author.voice:
-            await ctx.send("❌ 你必須先加入語音頻道。")
+            await ctx.send('❌ 你必須先加入語音頻道。')
             return
-
         channel = ctx.author.voice.channel
-
-        # ── Lavalink 健康檢查 ──────────────────────────────────────
-        connected_nodes = [
-            n for n in wavelink.Pool.nodes.values()
-            if n.status == wavelink.NodeStatus.CONNECTED
-        ]
-        logger.info(
-            f"[join] guild={ctx.guild.id} | target={channel.name} | "
-            f"nodes_total={len(wavelink.Pool.nodes)} | nodes_ok={len(connected_nodes)}"
-        )
-        if not connected_nodes:
-            await ctx.send("⚠️ Lavalink 尚未就緒，正在重新連接，請稍後再試...")
-            await self.connect_to_lavalink()
-            return
-        # ─────────────────────────────────────────────────────────────
-
-        if ctx.voice_client:
-            logger.info(f"[join] 已在頻道，移動到 {channel.name}")
-            try:
-                await ctx.voice_client.move_to(channel)
-                await ctx.send(f"✅ 已移動到語音頻道：{channel.name}")
-            except Exception as e:
-                logger.error(f"[join] move_to 失敗，改用斷線重連: {e}", exc_info=True)
-                try:
-                    await ctx.voice_client.disconnect()
-                except Exception:
-                    pass
-                # 斷線後走一般連線流程（重試 3 次）
-                for attempt in range(3):
-                    server_before = lavalink_manager.current_server if lavalink_manager else None
-                    try:
-                        player: wavelink.Player = await channel.connect(
-                            cls=wavelink.Player, self_deaf=True, timeout=10.0
-                        )
-                        player.last_channel = ctx.channel
-                        logger.info(f"[join] 重連成功: {channel.name}")
-                        await ctx.send(f"✅ 已重新加入語音頻道：{channel.name}")
-                        return
-                    except Exception as e2:
-                        logger.error(f"[join] 重連嘗試 #{attempt+1} 失敗: {e2}", exc_info=True)
-                        if attempt < 2:
-                            already_switched = (
-                                lavalink_manager and
-                                lavalink_manager.current_server is not None and
-                                lavalink_manager.current_server != server_before
-                            )
-                            if already_switched:
-                                await asyncio.sleep(1)
-                            else:
-                                if lavalink_manager and lavalink_manager.current_server:
-                                    lavalink_manager.current_server.status = "voice_fail"
-                                    lavalink_manager.current_server.error_count += 5
-                                switched = await self.switch_lavalink_server()
-                                if not switched:
-                                    await ctx.send("❌ 找不到其他可用的 Lavalink 伺服器，無法連接。")
-                                    return
-                                await asyncio.sleep(1)
-                        else:
-                            await ctx.send(
-                                f"❌ 移動頻道失敗，三次重連均失敗，請稍後再試。\n"
-                                f"最後錯誤: `{e2}`"
-                            )
-        else:
-            for attempt in range(3):
-                server_before = lavalink_manager.current_server if lavalink_manager else None
-                try:
-                    logger.info(
-                        f"[join] 嘗試 #{attempt+1} 連線到 {channel.name} "
-                        f"(guild={ctx.guild.id}, node={list(wavelink.Pool.nodes.keys())})"
-                    )
-                    player: wavelink.Player = await channel.connect(
-                        cls=wavelink.Player, self_deaf=True, timeout=10.0
-                    )
-                    player.last_channel = ctx.channel
-                    logger.info(f"[join] 連線成功: {channel.name} | node={player.node.identifier}")
-                    await ctx.send(f"✅ 已加入語音頻道：{channel.name}")
-                    return
-                except Exception as e:
-                    logger.error(f"[join] 嘗試 #{attempt+1} 失敗: {e}", exc_info=True)
-                    if attempt < 2:
-                        # 檢查快速斷線處理器是否已切換伺服器
-                        already_switched = (
-                            lavalink_manager and
-                            lavalink_manager.current_server is not None and
-                            lavalink_manager.current_server != server_before
-                        )
-                        if already_switched:
-                            logger.info("[join] 快速斷線已切換伺服器，直接重試...")
-                            await asyncio.sleep(1)
-                        else:
-                            if lavalink_manager and lavalink_manager.current_server:
-                                lavalink_manager.current_server.status = "voice_fail"
-                                lavalink_manager.current_server.error_count += 5
-                            switched = await self.switch_lavalink_server()
-                            if not switched:
-                                await ctx.send("❌ 找不到其他可用的 Lavalink 伺服器，無法連接。")
-                                return
-                            await asyncio.sleep(1)
-                    else:
-                        await ctx.send(
-                            f"❌ 三次嘗試均失敗，請稍後再試。\n"
-                            f"最後錯誤: `{e}`"
-                        )
+        try:
+            if ctx.voice_client and ctx.voice_client.connected:
+                await ctx.voice_client.move_to(channel, timeout=30.0)
+                ctx.voice_client.last_channel = ctx.channel
+            else:
+                await self._connect_voice(ctx.guild, channel, ctx.channel)
+            await ctx.send(f'✅ 已加入語音頻道：{channel.name}')
+        except Exception:
+            logger.exception('語音連線失敗')
+            await ctx.send('❌ 語音連線失敗，請稍後重試；本機音樂節點已保留。')
 
     @commands.hybrid_command()
     async def play(self, ctx, *, search: str):
@@ -1153,50 +945,15 @@ class EnhancedMusic(commands.Cog):
                 await ctx.send("❌ 你必須先加入語音頻道。")
                 return
 
-            if not ctx.voice_client:
-                vc_channel = ctx.author.voice.channel
-                connected = False
-                for attempt in range(3):
-                    server_before = lavalink_manager.current_server if lavalink_manager else None
-                    try:
-                        logger.info(
-                            f"[play] 嘗試 #{attempt+1} 連線到 {vc_channel.name} "
-                            f"(node={list(wavelink.Pool.nodes.keys())})"
-                        )
-                        player = await vc_channel.connect(
-                            cls=wavelink.Player, self_deaf=True, timeout=10.0
-                        )
-                        player.last_channel = ctx.channel
-                        logger.info(f"[play] 語音連線成功 | node={player.node.identifier}")
-                        connected = True
-                        break
-                    except Exception as e:
-                        logger.error(f"[play] 嘗試 #{attempt+1} 失敗: {e}", exc_info=True)
-                        if attempt < 2:
-                            already_switched = (
-                                lavalink_manager and
-                                lavalink_manager.current_server is not None and
-                                lavalink_manager.current_server != server_before
-                            )
-                            if already_switched:
-                                logger.info("[play] 快速斷線已切換伺服器，直接重試...")
-                                await asyncio.sleep(1)
-                            else:
-                                if lavalink_manager and lavalink_manager.current_server:
-                                    lavalink_manager.current_server.status = "voice_fail"
-                                    lavalink_manager.current_server.error_count += 5
-                                switched = await self.switch_lavalink_server()
-                                if not switched:
-                                    await ctx.send("❌ 無法切換 Lavalink 伺服器，請稍後再試。")
-                                    return
-                                await asyncio.sleep(1)
-                        else:
-                            await ctx.send(f"❌ 無法連接到語音頻道（三次嘗試均失敗）: `{e}`")
-                            return
-                if not connected:
+            if not ctx.voice_client or not ctx.voice_client.connected:
+                try:
+                    player = await self._connect_voice(ctx.guild, ctx.author.voice.channel, ctx.channel)
+                except Exception:
+                    logger.exception('播放前語音連線失敗')
+                    await ctx.send('❌ 無法連接語音頻道，請稍後重試；本機音樂節點已保留。')
                     return
             else:
-                player: wavelink.Player = ctx.voice_client
+                player = ctx.voice_client
                 player.last_channel = ctx.channel
 
             # 增強的搜尋邏輯，支援自動重試和伺服器切換
@@ -1215,16 +972,6 @@ class EnhancedMusic(commands.Cog):
                         
                 except Exception as e:
                     logger.warning(f"⚠️ 第 {attempt + 1} 次搜尋失敗: {e}")
-                    
-                    # 如果是 Lavalink 相關錯誤，嘗試切換伺服器
-                    if "Failed to Load Tracks" in str(e) or "FriendlyException" in str(e):
-                        logger.info("🔄 檢測到 Lavalink 搜尋錯誤，嘗試切換伺服器...")
-                        if await self.switch_lavalink_server():
-                            logger.info("✅ 已切換伺服器，將重試搜尋")
-                            await asyncio.sleep(1)  # 等待連接穩定
-                            continue
-                        else:
-                            logger.error("❌ 伺服器切換失敗")
                     
                     # 如果是最後一次嘗試，拋出異常
                     if attempt == max_retries - 1:
@@ -1250,7 +997,7 @@ class EnhancedMusic(commands.Cog):
                         queue.add(t)
                     added += 1
                 if first_track:
-                    await player.play(first_track)
+                    await self._play_track(player, first_track, manual=True)
                     queue.add_to_history(first_track)
                 embed = discord.Embed(
                     title="📋 播放清單已導入",
@@ -1293,12 +1040,10 @@ class EnhancedMusic(commands.Cog):
                             queue.add(track)
                             await interaction.response.send_message(f"✅ 已加入佇列: **{track.title}**")
                         else:
-                            await player.play(track)
+                            await self.music_cog._play_track(player, track, manual=True)
                             # 將直接播放的歌曲添加到歷史記錄
                             queue.add_to_history(track)
-                            embed = self.music_cog.create_now_playing_embed(player, self.ctx.guild.id)
-                            view = MusicControlView(player, self.music_cog)
-                            await interaction.response.send_message(embed=embed, view=view)
+                            await interaction.response.send_message(f'⏳ 正在載入：{track.title}', ephemeral=True)
 
                 class SearchResultView(discord.ui.View):
                     def __init__(self, tracks, music_cog, ctx):
@@ -1337,12 +1082,10 @@ class EnhancedMusic(commands.Cog):
                 await ctx.send(embed=embed)
             else:
                 try:
-                    await player.play(track)
+                    await self._play_track(player, track, manual=True)
                     # 將直接播放的歌曲添加到歷史記錄
                     queue.add_to_history(track)
-                    embed = self.create_now_playing_embed(player, ctx.guild.id)
-                    view = MusicControlView(player, self)
-                    await ctx.send(embed=embed, view=view)
+                    await ctx.send(f'⏳ 正在載入：{track.title}')
                 except Exception as e:
                     logger.error(f"播放音樂失敗: {e}")
                     # 將歌曲加入佇列而不是直接播放
@@ -1366,11 +1109,7 @@ class EnhancedMusic(commands.Cog):
 
         except LavalinkException as e:
             logger.error(f"Lavalink 錯誤: {e}")
-            # 嘗試切換伺服器
-            if await self.switch_lavalink_server():
-                await ctx.send("🔄 已切換到新的音樂伺服器，請重試播放命令")
-            else:
-                await ctx.send("❌ 音樂服務錯誤: 無法播放此音樂，請稍後再試")
+            await ctx.send('❌ 音源讀取失敗，請稍後重試或更換音源；本機節點已保留。')
         except Exception as e:
             await ctx.send(f"❌ 播放音樂時出錯: {e}")
             logger.error(f"播放音樂時出錯: {e}")
@@ -1458,11 +1197,9 @@ class EnhancedMusic(commands.Cog):
         try:
             next_track = queue.get_next()
             if next_track:
-                await player.play(next_track)
+                await self._play_track(player, next_track, manual=True)
                 # get_next() 已經將歌曲添加到歷史記錄，這裡不需要重複添加
-                embed = self.create_now_playing_embed(player, ctx.guild.id)
-                view = MusicControlView(player, self)
-                await ctx.send(embed=embed, view=view)
+                await ctx.send(f'⏳ 正在載入：{next_track.title}')
             else:
                 await ctx.send("❌ 佇列中沒有可播放的音樂。")
         except Exception as e:
@@ -1940,12 +1677,10 @@ class EnhancedMusic(commands.Cog):
                     queue.add(track)
                     await interaction.response.send_message(f"✅ 已加入佇列: **{track.title}**", ephemeral=True)
                 else:
-                    await player.play(track)
+                    await self.music_cog._play_track(player, track, manual=True)
                     # 將直接播放的歌曲添加到歷史記錄
                     queue.add_to_history(track)
-                    embed = self.music_cog.create_now_playing_embed(player, self.ctx.guild.id)
-                    view = MusicControlView(player, self.music_cog)
-                    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+                    await interaction.response.send_message(f'⏳ 正在載入：{track.title}', ephemeral=True)
 
         class SearchResultView(discord.ui.View):
             def __init__(self, tracks, music_cog, ctx):
