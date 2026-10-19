@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import json
 import logging
 
 from discord.ext import commands
@@ -46,12 +47,33 @@ class MusicIntentRouter:
         self.bot = bot
         self._guild_locks = {}
 
+    def context_for(self, message):
+        """即使無法提供工具，也讓模型知道實際限制與下一步。"""
+        voice = getattr(message.author, 'voice', None)
+        if message.guild is None:
+            reason, guidance = 'guild_required', '請到伺服器加入語音頻道，再於文字頻道直接提及機器人點歌。'
+        elif self.bot.user is None or self.bot.user not in message.mentions:
+            reason, guidance = 'mention_required', '請直接提及機器人提出音樂操作。'
+        elif self.bot.get_cog('EnhancedMusic') is None:
+            reason, guidance = 'music_unavailable', '音樂模組暫時未載入，請稍後重試或聯絡管理員。'
+        elif not voice or not voice.channel:
+            reason, guidance = 'not_in_voice', '請先加入同一伺服器的語音頻道，再提及機器人點歌，例如「@呱呱 播放 loser」。'
+        else:
+            reason, guidance = 'ready', '可以透過 control_music 音樂工具處理本輪明確的操作請求。'
+        return {'capability': 'discord_music', 'available': reason == 'ready',
+                'reason': reason, 'guidance': guidance}
+
+    def instructions_for(self, message):
+        return (
+            '機器人整合了音樂播放器，具備播放音樂能力。以下是程式驗證的本輪狀態：'
+            + json.dumps(self.context_for(message), ensure_ascii=False)
+            + '\n若用戶要求音樂操作但 available 為 false，依 guidance 說明如何啟用；'
+            '不要誤稱自己只是語言模型、沒有播放音樂能力。一般閒聊不必提及音樂限制。'
+        )
+
     def tools_for(self, message):
         voice = getattr(message.author, 'voice', None)
-        if (message.guild is None or getattr(message.author, 'bot', False)
-                or self.bot.user is None or self.bot.user not in message.mentions
-                or not voice or not voice.channel
-                or self.bot.get_cog('EnhancedMusic') is None):
+        if getattr(message.author, 'bot', False) or not self.context_for(message)['available']:
             return {}
 
         voice_id = voice.channel.id

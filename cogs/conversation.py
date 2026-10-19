@@ -3,11 +3,12 @@ import discord
 from discord.ext import commands
 import random
 import asyncio
+import importlib
 import config
 import logging
 from utils.llm_handler import LLMHandler
 from utils.user_database import user_db
-from utils.music_intents import MusicIntentRouter
+from utils import music_intents
 
 logger = logging.getLogger("discord")
 
@@ -20,7 +21,8 @@ class Conversation(commands.Cog):
         self.llm_handler = LLMHandler(bot_name=bot.user.name if bot.user else "助手")
         self.greetings = ["你好", "嗨", "哈囉", "安安", "嘿"]
         self.processing_messages = set()  # 防止重複處理同一訊息
-        self.music_intents = MusicIntentRouter(bot)
+        # Cog 重載不會自動重載已快取的工具模組；此模組僅含工具定義與類別。
+        self.music_intents = importlib.reload(music_intents).MusicIntentRouter(bot)
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -200,6 +202,7 @@ class Conversation(commands.Cog):
                             str(message.author.id), channel_id, parts,
                             user_message=content, user_context=full_context,
                             request_tools=self.music_intents.tools_for(message),
+                            request_instructions=self.music_intents.instructions_for(message),
                         ),
                         initial_msg=sent_message,
                     )

@@ -68,6 +68,69 @@ def test_music_tool_requires_guild_voice_and_explicit_mention():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('state,reason', [
+    ('ready', 'ready'), ('no_voice', 'not_in_voice'),
+    ('dm', 'guild_required'), ('no_mention', 'mention_required'),
+    ('no_music', 'music_unavailable'),
+])
+def test_music_context_reports_why_commands_are_unavailable(state, reason):
+    async def run():
+        bot, router, message, _ = await make_router()
+        try:
+            if state == 'no_voice': message.author.voice = None
+            elif state == 'dm': message.guild = None
+            elif state == 'no_mention': message.mentions = []
+            elif state == 'no_music': await bot.remove_cog('EnhancedMusic')
+            context = router.context_for(message)
+            assert context['reason'] == reason
+            assert context['available'] is (state == 'ready')
+        finally:
+            await bot.close()
+    asyncio.run(run())
+
+
+def test_voice_guidance_is_request_scoped_and_does_not_leak_into_other_users(handler, monkeypatch):
+    prompts = {}
+    async def gemini(user_id, channel_id, message):
+        await asyncio.sleep(0)
+        prompts[user_id] = handler._get_request_system_prompt()
+        yield 'reply'
+    monkeypatch.setattr(handler, '_get_gemini_response_stream', gemini)
+    async def run():
+        async def collect(user_id, instructions):
+            return ''.join([chunk async for chunk in handler.get_llm_response_stream(
+                user_id, '10', '播放 loser', request_instructions=instructions,
+            )])
+        await asyncio.gather(collect('1', 'user-one-not-in-voice'), collect('2', 'user-two-in-voice'))
+        prompt = handler._get_request_system_prompt()
+        assert 'user-one-not-in-voice' not in prompt
+        assert 'user-two-in-voice' not in prompt
+    asyncio.run(run())
+    assert 'user-one-not-in-voice' in prompts['1']
+    assert 'user-two-in-voice' not in prompts['1']
+    assert 'user-two-in-voice' in prompts['2']
+    assert 'user-one-not-in-voice' not in prompts['2']
+
+
+def test_reloaded_conversation_replaces_cached_music_router(memory_db, monkeypatch):
+    import cogs.conversation as conversation
+    from cogs.conversation import Conversation
+    from utils import music_intents
+    class CachedOldRouter:
+        def __init__(self, bot): pass
+        def tools_for(self, message): return {}
+    monkeypatch.setattr(music_intents, 'MusicIntentRouter', CachedOldRouter)
+    monkeypatch.setattr(conversation, 'MusicIntentRouter', CachedOldRouter, raising=False)
+    bot = SimpleNamespace(user=SimpleNamespace(name='呱呱', id=999), get_cog=lambda name: object())
+    cog = Conversation(bot)
+    message = SimpleNamespace(guild=SimpleNamespace(id=10),
+                              author=SimpleNamespace(voice=None, bot=False), mentions=[bot.user])
+    try:
+        assert cog.music_intents.context_for(message)['reason'] == 'not_in_voice'
+    finally:
+        asyncio.run(cog.llm_handler.close())
+
+
 def test_music_tool_executes_existing_command_once_and_keeps_original_message():
     async def run():
         bot, router, message, events = await make_router()

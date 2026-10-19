@@ -80,6 +80,7 @@ class LLMHandler:
         self._http_session: aiohttp.ClientSession | None = None
         self._conversation_locks = {}
         self._request_tools = ContextVar('llm_request_tools', default=None)
+        self._request_instructions = ContextVar('llm_request_instructions', default='')
 
         # 定義可用工具映射
         self.available_functions = {
@@ -489,7 +490,7 @@ class LLMHandler:
             self._gemini_quota_exceeded = False; return True
         return False
     
-    async def get_llm_response_stream(self, user_id: str, channel_id: str, parts_or_message, *, user_message=None, user_context="", request_tools=None) -> AsyncGenerator[str, None]:
+    async def get_llm_response_stream(self, user_id: str, channel_id: str, parts_or_message, *, user_message=None, user_context="", request_tools=None, request_instructions="") -> AsyncGenerator[str, None]:
         """統一的串流回應進入點"""
         key = (user_id, channel_id)
         lock = self._conversation_locks.setdefault(key, asyncio.Lock())
@@ -498,11 +499,13 @@ class LLMHandler:
             try:
                 while True:
                     token = self._request_tools.set(request_tools or {})
+                    instructions_token = self._request_instructions.set(request_instructions)
                     try:
                         chunk = await anext(stream)
                     except StopAsyncIteration:
                         break
                     finally:
+                        self._request_instructions.reset(instructions_token)
                         self._request_tools.reset(token)
                     yield chunk
             finally:
@@ -513,6 +516,8 @@ class LLMHandler:
 
     def _get_request_system_prompt(self):
         prompt = self.system_prompt
+        if self._request_instructions.get():
+            prompt += '\n\n【本輪功能狀態】\n' + self._request_instructions.get()
         if self._request_tools.get():
             prompt += (
                 '\n\n本輪可透過 control_music 執行音樂操作。只處理用戶本輪明確提出的請求，'
