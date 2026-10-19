@@ -411,6 +411,9 @@ class LLMHandler:
 
         headers = {"Authorization": f"Bearer {config.LMSTUDIO_API_KEY}", "Content-Type": "application/json"}
         model_id = await self._get_lmstudio_model_id()
+        guard_music = 'control_music' in (self._request_tools.get() or {})
+        music_attempted = music_dispatched = False
+        music_error = ''
 
         for round_idx in range(5):
             payload = {
@@ -421,7 +424,8 @@ class LLMHandler:
             async for text, tool_delta, _ in self._stream_lmstudio_sse(url, payload, headers, tag=f" R{round_idx+1}"):
                 if text:
                     final_content += text
-                    yield text
+                    if not guard_music:
+                        yield text
                 if tool_delta:
                     for d in tool_delta:
                         idx = d.get("index", 0)
@@ -433,7 +437,23 @@ class LLMHandler:
                         if f.get("name"): collected_tool_calls[idx]["name"] += f["name"]
                         if f.get("arguments"): collected_tool_calls[idx]["arguments"] += f["arguments"]
 
-            if not collected_tool_calls: break
+            if not collected_tool_calls:
+                if guard_music:
+                    claims_action = re.search(r'(?:已經?|正在|現在)(?:為[您你]|幫[您你])?.{0,16}(?:播放|重播|暫停|跳過|調整音量)', final_content)
+                    context = (self._request_tools.get() or {})['control_music'].get('context', {})
+                    status_question = re.search(r'(?:播放?|放).{0,3}(?:什麼|甚麼|哪首)|還在(?:播|放)|now.?playing', message, re.I)
+                    current_title = context.get('current_track')
+                    verified_status = status_question and (
+                        (current_title and current_title.casefold() in final_content.casefold())
+                        or ('current_track' in context and not current_title and re.search(r'沒有|尚未|未在', final_content)))
+                    if claims_action and not music_dispatched and not verified_status:
+                        if not music_attempted and round_idx == 0:
+                            messages[0]['content'] += '\n你上一輪沒有呼叫音樂工具，因此尚未執行任何操作。若用戶本輪明確要求播放或重新播放，請現在呼叫 control_music；其他情況正常回答，不可宣稱已執行。'
+                            continue
+                        yield '❌ ' + (music_error or '尚未執行音樂操作，請重新提出點歌要求，或使用 /play 歌名。')
+                    else:
+                        yield final_content
+                break
             if round_idx == 4:
                 raise RuntimeError('工具呼叫次數超過上限')
 
@@ -452,6 +472,10 @@ class LLMHandler:
                 try: args = json.loads(call["arguments"])
                 except: args = {}
                 result = await self._execute_tool(name, args)
+                if name == 'control_music':
+                    music_attempted = True
+                    music_dispatched = isinstance(result, dict) and result.get('status') in ('dispatched', 'unchanged')
+                    music_error = result.get('message', '') if isinstance(result, dict) else ''
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call["id"],

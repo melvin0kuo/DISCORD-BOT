@@ -60,8 +60,11 @@ class MusicIntentRouter:
             reason, guidance = 'not_in_voice', '請先加入同一伺服器的語音頻道，再提及機器人點歌，例如「@呱呱 播放 loser」。'
         else:
             reason, guidance = 'ready', '可以透過 control_music 音樂工具處理本輪明確的操作請求。'
+        player = getattr(message.guild, 'voice_client', None)
         return {'capability': 'discord_music', 'available': reason == 'ready',
-                'reason': reason, 'guidance': guidance}
+                'reason': reason, 'guidance': guidance,
+                'bot_connected': bool(player and getattr(player, 'connected', False)),
+                'current_track': getattr(getattr(player, 'current', None), 'title', None)}
 
     def instructions_for(self, message):
         return (
@@ -69,6 +72,8 @@ class MusicIntentRouter:
             + json.dumps(self.context_for(message), ensure_ascii=False)
             + '\n若用戶要求音樂操作但 available 為 false，依 guidance 說明如何啟用；'
             '不要誤稱自己只是語言模型、沒有播放音樂能力。一般閒聊不必提及音樂限制。'
+            ' available 為 true 時，用戶已符合語音條件，即使機器人尚未加入也應呼叫播放工具，由程式自動加入。'
+            '每一則新的播放或重新播放要求都必須重新呼叫 control_music，不能把歷史回覆當成本輪已執行。'
         )
 
     def tools_for(self, message):
@@ -101,7 +106,7 @@ class MusicIntentRouter:
                     if not voice or not voice.channel or voice.channel.id != voice_id:
                         return self._error('用戶已離開或切換語音頻道，請重新提出音樂請求。')
                     player = message.guild.voice_client
-                    if player and (not player.channel or player.channel.id != voice_id):
+                    if player and getattr(player, 'connected', True) and (not player.channel or player.channel.id != voice_id):
                         return self._error('機器人正在其他語音頻道服務，無法操作該頻道的音樂。')
                     if action == 'volume' and volume_delta is not None:
                         if not player:
@@ -143,7 +148,8 @@ class MusicIntentRouter:
                         previous_result = self._error('音樂操作失敗，請稍後再試。')
                     return previous_result
 
-        return {'control_music': {'callback': control_music, 'schema': MUSIC_TOOL_SCHEMA}}
+        return {'control_music': {'callback': control_music, 'schema': MUSIC_TOOL_SCHEMA,
+                                  'context': self.context_for(message)}}
 
     @staticmethod
     def _error(message):

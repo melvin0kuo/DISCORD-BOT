@@ -374,6 +374,8 @@ class EnhancedMusic(commands.Cog):
         self._playback_generation = {}
         self._fallback_attempts = {}
         self._playback_active = {}
+        self._idle_tasks = {}
+        self._idle_disconnecting = set()
         self.ensure_data_dir()
         self.load_playlists()
         self.load_autoplay_config()
@@ -389,6 +391,12 @@ class EnhancedMusic(commands.Cog):
         lavalink_manager = module.lavalink_manager
         if self.bot.is_ready():
             await self.connect_to_lavalink()
+
+    async def cog_unload(self):
+        tasks = list(self._idle_tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
@@ -463,7 +471,7 @@ class EnhancedMusic(commands.Cog):
             if os.path.exists(self.autoplay_config_file):
                 with open(self.autoplay_config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)
-                    self.autoplay_enabled = config.get('autoplay_enabled', {})
+                    self.autoplay_enabled = {int(key): value for key, value in config.get('autoplay_enabled', {}).items()}
                     logger.info(f"📂 載入自動播放設定: {len(self.autoplay_enabled)} 個伺服器")
             else:
                 # 預設所有伺服器啟用自動播放
@@ -486,8 +494,8 @@ class EnhancedMusic(commands.Cog):
             logger.error(f"儲存自動播放設定失敗: {e}")
     
     def get_autoplay_status(self, guild_id: int) -> bool:
-        """獲取伺服器的自動播放狀態（預設開啟）"""
-        return self.autoplay_enabled.get(guild_id, True)  # 預設為 True（啟用）
+        """只有明確啟用時才自動推薦，否則播完離開。"""
+        return self.autoplay_enabled.get(guild_id, False)
     
     def set_autoplay_status(self, guild_id: int, enabled: bool):
         """設置伺服器的自動播放狀態並保存"""
@@ -692,15 +700,49 @@ class EnhancedMusic(commands.Cog):
 
     @commands.Cog.listener()
     async def on_wavelink_inactive_player(self, player: wavelink.Player):
-        """播放器閒置事件——只記 log，不自動斷線"""
-        logger.info(
-            f"[閒置] guild={player.guild.id} | "
-            f"current={player.current} | "
-            f"channel={getattr(player, 'channel', None)}"
-        )
+        await self._disconnect_idle_player(player, self._playback_generation.get(player.guild.id, 0))
+
+    def _cancel_idle_disconnect(self, guild_id):
+        task = self._idle_tasks.get(guild_id)
+        if task and guild_id not in self._idle_disconnecting:
+            self._idle_tasks.pop(guild_id, None)
+            task.cancel()
+
+    def _schedule_idle_disconnect(self, player):
+        guild_id = player.guild.id
+        self._cancel_idle_disconnect(guild_id)
+        generation = self._playback_generation.get(guild_id, 0)
+        async def wait_and_leave():
+            try:
+                await asyncio.sleep(config.MUSIC_IDLE_TIMEOUT)
+                await self._disconnect_idle_player(player, generation)
+            except Exception:
+                logger.exception('閒置離開語音頻道失敗')
+            finally:
+                if self._idle_tasks.get(guild_id) is asyncio.current_task():
+                    self._idle_tasks.pop(guild_id, None)
+        self._idle_tasks[guild_id] = asyncio.create_task(wait_and_leave())
+
+    async def _disconnect_idle_player(self, player, generation):
+        guild_id = player.guild.id
+        async with self._voice_locks.setdefault(guild_id, asyncio.Lock()):
+            if (player.guild.voice_client is not player
+                    or self._playback_generation.get(guild_id, 0) != generation
+                    or player.current is not None
+                    or (self.get_queue(guild_id).queue and guild_id not in self._playback_blocked)):
+                return
+            self._idle_disconnecting.add(guild_id)
+            try:
+                self._cancel_pending_playback(guild_id)
+                self._user_stopped.add(guild_id)
+                await player.disconnect(force=True)
+                logger.info('佇列已播完，自動離開語音頻道 | guild=%s', guild_id)
+            finally:
+                self._idle_disconnecting.discard(guild_id)
 
     async def _halt_failed_playback(self, player, track=None):
         guild_id = player.guild.id
+        generation = self._playback_generation.get(guild_id, 0)
         player.autoplay = wavelink.AutoPlayMode.disabled
         if guild_id in self._playback_blocked:
             return
@@ -724,6 +766,8 @@ class EnhancedMusic(commands.Cog):
                     logger.info('未能取得其他音源候選')
             if self._playback_generation.get(guild_id, 0) == generation:
                 await channel.send(notice, allowed_mentions=discord.AllowedMentions.none())
+        if self._playback_generation.get(guild_id, 0) == generation:
+            self._schedule_idle_disconnect(player)
 
     def _cancel_pending_playback(self, guild_id):
         self._playback_generation[guild_id] = self._playback_generation.get(guild_id, 0) + 1
@@ -737,14 +781,20 @@ class EnhancedMusic(commands.Cog):
         active = self._playback_active.get(guild_id)
         if active is None:
             return guild_id not in self._playback_generation
-        return active == (generation, getattr(track, 'encoded', None))
+        return active == (generation, self._track_identity(track))
+
+    @staticmethod
+    def _track_identity(track):
+        # HTTP source 在探測容器格式後可能更新 encoded；identifier 才是穩定識別。
+        return (getattr(track, 'source', None),
+                getattr(track, 'identifier', None) or getattr(track, 'encoded', None))
 
     async def _handle_track_failure(self, player, track):
         guild_id = player.guild.id
         if not self._is_current_track_event(guild_id, track):
             return
         generation = self._playback_generation.get(guild_id, 0)
-        key = (generation, getattr(track, 'encoded', None))
+        key = (generation, self._track_identity(track))
         if self._fallback_attempts.get(guild_id) == key:
             return  # exception 與 loadFailed 是同一輪失敗，不重複擷取或報錯。
         if (guild_id not in self._playback_blocked and getattr(track, 'source', None) == 'youtube'
@@ -755,7 +805,7 @@ class EnhancedMusic(commands.Cog):
                 if self._playback_generation.get(guild_id, 0) != generation or not getattr(player, 'connected', True):
                     return
                 fallback.extras = {**dict(getattr(fallback, 'extras', {})), '_request_generation': generation}
-                self._playback_active[guild_id] = (generation, fallback.encoded)
+                self._playback_active[guild_id] = (generation, self._track_identity(fallback))
                 await player.play(fallback)
                 logger.info('已切換原歌曲的 yt-dlp 音訊備援: %s', track.title)
                 return
@@ -798,16 +848,20 @@ class EnhancedMusic(commands.Cog):
                                            view=MusicControlView(player, self))
 
     async def _play_track(self, player, track, *, manual=False):
-        if manual:
-            self._playback_blocked.discard(player.guild.id)
-        elif player.guild.id in self._playback_blocked:
-            return False
-        self._cancel_pending_playback(player.guild.id)
-        generation = self._playback_generation[player.guild.id]
-        track.extras = {**dict(getattr(track, 'extras', {})), '_request_generation': generation}
-        self._playback_active[player.guild.id] = (generation, getattr(track, 'encoded', None))
-        await player.play(track)
-        return True
+        self._cancel_idle_disconnect(player.guild.id)
+        async with self._voice_locks.setdefault(player.guild.id, asyncio.Lock()):
+            if getattr(player.guild, 'voice_client', player) is not player:
+                raise RuntimeError('播放器已離開語音頻道，請重新點歌')
+            if manual:
+                self._playback_blocked.discard(player.guild.id)
+            elif player.guild.id in self._playback_blocked:
+                return False
+            self._cancel_pending_playback(player.guild.id)
+            generation = self._playback_generation[player.guild.id]
+            track.extras = {**dict(getattr(track, 'extras', {})), '_request_generation': generation}
+            self._playback_active[player.guild.id] = (generation, self._track_identity(track))
+            await player.play(track)
+            return True
 
     @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload):
@@ -840,6 +894,8 @@ class EnhancedMusic(commands.Cog):
                 except Exception:
                     logger.exception('播放下一首失敗')
                     await self._halt_failed_playback(player, next_track)
+            else:
+                self._schedule_idle_disconnect(player)
 
     def _extract_youtube_id(self, uri: str) -> Optional[str]:
         """從 YouTube URL 或 identifier 提取 video ID"""
@@ -956,9 +1012,14 @@ class EnhancedMusic(commands.Cog):
             return False
 
     async def _connect_voice(self, guild, channel, text_channel):
+        self._cancel_idle_disconnect(guild.id)
         lock = self._voice_locks.setdefault(guild.id, asyncio.Lock())
         async with lock:
             current = guild.voice_client
+            if current and isinstance(current, VoicePlayer):
+                if not await current.refresh_playback_state():
+                    await current.disconnect(force=True)
+                    current = None
             if current and getattr(current, 'connected', False):
                 if current.channel != channel:
                     raise RuntimeError('機器人已在其他語音頻道服務')
@@ -1019,16 +1080,12 @@ class EnhancedMusic(commands.Cog):
                 await ctx.send("❌ 你必須先加入語音頻道。")
                 return
 
-            if not ctx.voice_client or not ctx.voice_client.connected:
-                try:
-                    player = await self._connect_voice(ctx.guild, ctx.author.voice.channel, ctx.channel)
-                except Exception:
-                    logger.exception('播放前語音連線失敗')
-                    await ctx.send('❌ 無法連接語音頻道，請稍後重試；本機音樂節點已保留。')
-                    return
-            else:
-                player = ctx.voice_client
-                player.last_channel = ctx.channel
+            try:
+                player = await self._connect_voice(ctx.guild, ctx.author.voice.channel, ctx.channel)
+            except Exception:
+                logger.exception('播放前語音連線失敗')
+                await ctx.send('❌ 無法連接語音頻道，請稍後重試；本機音樂節點已保留。')
+                return
 
             # 增強的搜尋邏輯，支援自動重試和伺服器切換
             max_retries = 3
