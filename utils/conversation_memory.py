@@ -36,7 +36,7 @@ class ConversationMemory:
             
             # 加入短期記憶
             if conversation_key not in self.short_term_memory:
-                self.short_term_memory[conversation_key] = []
+                self.short_term_memory[conversation_key] = user_db.get_conversation_turns(user_id, channel_id, 50)
             
             self.short_term_memory[conversation_key].append(turn_data)
             
@@ -145,7 +145,8 @@ class ConversationMemory:
             
             # 從資料庫獲取對話記錄
             interactions = user_db.get_user_interactions(user_id, limit=100)
-            message_interactions = [i for i in interactions if i['type'] in ['message', 'ai_response']]
+            message_interactions = [i for i in interactions if i['type'] in ['message', 'ai_response', 'chat_command']
+                                    and str(i['metadata'].get('channel_id')) == str(channel_id)]
             
             insights["total_conversations"] = len(message_interactions)
             
@@ -155,7 +156,7 @@ class ConversationMemory:
                 
                 # 提取常見話題
                 all_content = []
-                for interaction in message_interactions[-20:]:  # 分析最近20條
+                for interaction in message_interactions[:20]:  # 分析最近20條
                     if interaction['content']:
                         all_content.append(interaction['content'])
                 
@@ -165,7 +166,7 @@ class ConversationMemory:
                 insights["conversation_frequency"] = self._analyze_frequency(message_interactions)
                 
                 # 最新興趣
-                recent_messages = [i['content'] for i in message_interactions[-10:] if i['content']]
+                recent_messages = [i['content'] for i in message_interactions[:10] if i['content']]
                 insights["latest_interests"] = self._detect_user_interests(" ".join(recent_messages))
             
             return insights
@@ -180,6 +181,7 @@ class ConversationMemory:
             conversation_key = f"{user_id}_{channel_id}"
             cutoff_date = datetime.now() - timedelta(days=days_to_keep)
             
+            self.short_term_memory[conversation_key] = user_db.get_conversation_turns(user_id, channel_id)
             if conversation_key in self.short_term_memory:
                 # 保留最近的對話
                 recent_conversations = []
@@ -187,7 +189,7 @@ class ConversationMemory:
                 
                 for turn in self.short_term_memory[conversation_key]:
                     turn_date = datetime.fromisoformat(turn['timestamp'].replace('Z', '+00:00'))
-                    if turn_date > cutoff_date:
+                    if turn_date.astimezone() > cutoff_date.astimezone():
                         recent_conversations.append(turn)
                     else:
                         old_conversations.append(turn)
@@ -202,9 +204,11 @@ class ConversationMemory:
                 self.short_term_memory[conversation_key] = recent_conversations
                 
                 logger.info(f"清理了 {len(old_conversations)} 條舊對話記錄，創建了摘要")
+            return user_db.delete_old_conversation_turns(user_id, channel_id, cutoff_date)
             
         except Exception as e:
             logger.error(f"清理舊對話記錄失敗: {e}")
+            return 0
     
     def _generate_turn_id(self, user_id: str, channel_id: str, timestamp: str) -> str:
         """生成對話輪次ID"""
@@ -248,6 +252,10 @@ class ConversationMemory:
         """獲取最近的對話記錄"""
         try:
             conversation_key = f"{user_id}_{channel_id}"
+            if limit <= 0:
+                return []
+            if conversation_key not in self.short_term_memory:
+                self.short_term_memory[conversation_key] = user_db.get_conversation_turns(user_id, channel_id, max(50, limit))
             if conversation_key in self.short_term_memory:
                 return self.short_term_memory[conversation_key][-limit:]
             return []

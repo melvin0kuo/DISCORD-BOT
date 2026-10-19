@@ -62,6 +62,21 @@ source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+### 開發驗證
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+python -m ruff check main.py config.py cogs utils tests --select F821,F823,E9
+```
+
+自動測試使用暫存資料庫與本機測試伺服器，不需要 Discord Token、Gemini API 或正在運行的 Lavalink。
+根目錄與 `test/` 中的舊診斷腳本需要模型或外部服務，不屬於自動測試套件。
+
+LM Studio 可使用未啟用驗證的本機伺服器；設定 `DEFAULT_LLM_TYPE=local`、
+`LMSTUDIO_API_URL=http://localhost:1234` 及 `LMSTUDIO_MODEL` 即可。
+啟用驗證時另設定 `LMSTUDIO_API_KEY`。動態載入模型使用 LM Studio 原生 v1 管理 API。
+
 ### 3. 建立 `.env`
 
 在專案根目錄建立 `.env`，至少填入：

@@ -18,10 +18,14 @@ class CodeReloader(PatternMatchingEventHandler):
 
     def on_modified(self, event):
         """當文件被修改時觸發"""
+        self.loop.call_soon_threadsafe(self._schedule_on_loop, event.src_path)
+
+    def _schedule_on_loop(self, src_path):
+        """watchdog 在背景執行緒通知；所有 Task 操作留在事件迴圈。"""
         if self.debounce_task and not self.debounce_task.done():
             self.debounce_task.cancel()
         
-        logger.info(f"🔥 偵測到文件變更: {event.src_path}，準備熱重載...")
+        logger.info(f"🔥 偵測到文件變更: {src_path}，準備熱重載...")
         # 使用 debounce 避免短時間內多次觸發
         self.debounce_task = self.loop.create_task(self.schedule_reload())
 
@@ -65,7 +69,11 @@ def setup_reloader(bot, loop):
     event_handler = CodeReloader(bot, loop)
     observer = Observer()
     # 監控當前工作目錄下的所有 .py 文件
-    observer.schedule(event_handler, path='.', recursive=True)
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    observer.schedule(event_handler, path=str(root), recursive=False)
+    for folder in ('cogs', 'utils'):
+        observer.schedule(event_handler, path=str(root / folder), recursive=True)
     observer.start()
     logger.info("🔥 熱重載功能已啟動，監控 .py 文件變更...")
     return observer

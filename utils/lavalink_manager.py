@@ -315,7 +315,7 @@ class LavalinkServerManager:
                         server.response_time = time.time() - start
                         server.last_check = time.time()
 
-                        if resp.status in (200, 401):
+                        if resp.status == 200:
                             if resp.status == 200:
                                 try:
                                     data = await resp.json(content_type=None)

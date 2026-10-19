@@ -81,7 +81,7 @@ class ConversationMemoryCommands(commands.Cog):
                 value=(
                     f"**對話輪次**: {len(recent_conversations)} 輪\n"
                     f"**頻道**: {target_channel.mention}\n"
-                    f"**最後更新**: {recent_conversations[0]['created_at'][:19] if recent_conversations else 'N/A'}"
+                    f"**最後更新**: {recent_conversations[-1]['timestamp'][:19] if recent_conversations else 'N/A'}"
                 ),
                 inline=False
             )
@@ -149,7 +149,10 @@ class ConversationMemoryCommands(commands.Cog):
                 )
             
             # 對話統計
-            stats = insights.get('conversation_stats', {})
+            stats = {
+                'total_conversations': insights.get('total_conversations', 0),
+                'avg_message_length': insights.get('user_patterns', {}).get('avg_message_length', 0),
+            }
             if stats:
                 embed.add_field(
                     name="📈 對話統計",
@@ -415,7 +418,9 @@ class ConversationMemoryCommands(commands.Cog):
             all_conversations = {}
             
             # 從對話記憶系統獲取資料
-            memory_data = conversation_memory.memory_storage.get(str(target_user.id), {})
+            memory_data = {}
+            for turn in user_db.get_conversation_turns(str(target_user.id)):
+                memory_data.setdefault(turn['channel_id'], []).append(turn)
             
             # 格式化資料
             export_data = {

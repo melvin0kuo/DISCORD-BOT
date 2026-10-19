@@ -22,12 +22,14 @@ class Conversation(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        # 強制重新初始化 LLMHandler，確保 gemini_client 屬性存在
-        self.llm_handler = LLMHandler(bot_name=self.bot.user.name if self.bot.user else "助手")
+        self.llm_handler.bot_name = self.bot.user.name if self.bot.user else "助手"
+
+    async def cog_unload(self):
+        await self.llm_handler.close()
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        if message.author == self.bot.user:
+        if message.author.bot:
             return
         
         # 記錄所有訊息到日誌
@@ -184,15 +186,18 @@ class Conversation(commands.Cog):
                         logger.warning(f"獲取頻道訊息歷史失敗: {_hist_err}")
                     
                     # 將所有上下文插入到 parts 最前面
+                    full_context = "\n\n".join(context_blocks)
                     if context_blocks:
-                        full_context = "\n\n".join(context_blocks)
                         parts.insert(0, {"text": full_context})
                         logger.info(f"已添加完整上下文，總長度: {len(full_context)}")
                     
                     logger.info("開始生成 LLM 回應...")
                     response_text = await self._stream_with_pagination(
                         message.channel,
-                        self.llm_handler.get_llm_response_stream(str(message.author.id), channel_id, parts),
+                        self.llm_handler.get_llm_response_stream(
+                            str(message.author.id), channel_id, parts,
+                            user_message=content, user_context=full_context,
+                        ),
                         initial_msg=sent_message,
                     )
                     logger.info(f"LLM 回應生成完成，長度: {len(response_text)}")
@@ -248,37 +253,46 @@ class Conversation(commands.Cog):
         last_edit = 0.0
 
         async for chunk in stream_gen:
-            if not chunk or not chunk.strip():
+            if not chunk:
                 continue
             full_response += chunk
+            current_page += chunk
 
-            # chunk 本身超長時直接切割
-            while len(chunk) > LIMIT:
-                piece, chunk = chunk[:LIMIT], chunk[LIMIT:]
-                if current_page:
-                    await sent_msg.edit(content=current_page, allowed_mentions=_AM)
-                sent_msg = await channel.send(piece, allowed_mentions=_AM)
-                current_page = piece
+            # 如果當前頁超過上限，進行切割
+            while len(current_page) > LIMIT:
+                # 嘗試在最後一個換行符處切割，保持排版美觀
+                split_idx = current_page.rfind('\n', 0, LIMIT)
+                if split_idx <= 0 or not current_page[:split_idx].strip():
+                    split_idx = LIMIT
+
+                piece = current_page[:split_idx]
+                current_page = current_page[split_idx:]
+
+                try:
+                    await sent_msg.edit(content=piece if piece.strip() else '\u200b', allowed_mentions=_AM)
+                except:
+                    pass
+
+                sent_msg = await channel.send("💬 思考中...", allowed_mentions=_AM)
                 last_edit = time.monotonic()
 
-            if len(current_page) + len(chunk) > LIMIT:
-                # 當前頁已滿：定稿並開新訊息
-                await sent_msg.edit(content=current_page, allowed_mentions=_AM)
-                sent_msg = await channel.send(chunk, allowed_mentions=_AM)
-                current_page = chunk
-                last_edit = time.monotonic()
-            else:
-                current_page += chunk
-                now = time.monotonic()
-                if now - last_edit >= 0.8:
-                    try:
-                        await sent_msg.edit(content=current_page, allowed_mentions=_AM)
-                        last_edit = now
-                    except Exception:
-                        pass
+            # 定時更新串流效果
+            now = time.monotonic()
+            if now - last_edit >= 1.0: # 提高間隔避免 Discord Rate Limit
+                try:
+                    # 避免編輯後的內容為空
+                    display_text = current_page if current_page.strip() else "💬 思考中..."
+                    await sent_msg.edit(content=display_text, allowed_mentions=_AM)
+                    last_edit = now
+                except Exception:
+                    pass
 
+        # 最後一頁定稿
         if current_page:
-            await sent_msg.edit(content=current_page, allowed_mentions=_AM)
+            try:
+                await sent_msg.edit(content=current_page if current_page.strip() else '\u200b', allowed_mentions=_AM)
+            except:
+                await channel.send(current_page, allowed_mentions=_AM)
 
         return full_response
 
@@ -364,7 +378,10 @@ class Conversation(commands.Cog):
                 
                 response_text = await self._stream_with_pagination(
                     ctx.channel,
-                    self.llm_handler.get_llm_response_stream(str(ctx.author.id), channel_id, parts),
+                    self.llm_handler.get_llm_response_stream(
+                        str(ctx.author.id), channel_id, parts,
+                        user_message=message, user_context=user_context,
+                    ),
                 )
 
                 if response_text:
@@ -446,6 +463,36 @@ class Conversation(commands.Cog):
         except Exception as e:
             logger.error(f"切換模型時出錯: {e}", exc_info=True)
             await ctx.send(f"切換模型時出錯: {str(e)}")
+
+    @commands.command(name="list_local_models", help="列出 LM Studio 中所有可用的模型")
+    @commands.is_owner()
+    async def list_local_models(self, ctx):
+        """列出 LM Studio 模型列表"""
+        async with ctx.typing():
+            models = await self.llm_handler.list_lmstudio_models()
+            if not models:
+                await ctx.send("❌ 無法獲取模型列表或 LM Studio 未開啟。")
+                return
+
+            embed = discord.Embed(title="LM Studio 可用模型列表", color=discord.Color.blue())
+            for i, m in enumerate(models):
+                m_id = m.get("id", "Unknown")
+                embed.add_field(name=f"{i+1}. {m_id}", value="使用 `!load_local_model <ID>` 載入", inline=False)
+            await ctx.send(embed=embed)
+
+    @commands.command(name="load_local_model", help="在 LM Studio 中載入指定模型")
+    @commands.is_owner()
+    async def load_local_model(self, ctx, model_id: str):
+        """要求 LM Studio 載入特定模型"""
+        msg = await ctx.send(f"🔄 正在嘗試在 LM Studio 載入模型 `{model_id}`...（這可能需要一點時間）")
+        async with ctx.typing():
+            success = await self.llm_handler.load_lmstudio_model(model_id)
+            if success:
+                await msg.edit(content=f"✅ 已成功在 LM Studio 載入模型: `{model_id}`")
+                # 自動切換到 local 模式
+                self.llm_handler.switch_model("local")
+            else:
+                await msg.edit(content=f"❌ 載入模型 `{model_id}` 失敗，請檢查 LM Studio 日誌。")
 
 async def setup(bot):
     await bot.add_cog(Conversation(bot))

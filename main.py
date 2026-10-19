@@ -15,7 +15,6 @@ sys.stderr.reconfigure(encoding='utf-8')
 import config
 from utils.helpers import setup_logging
 from utils.gpu_monitor import GPUMonitor
-from utils.model_loader import ModelLoader
 from utils.reloader import setup_reloader
 
 # 設置日誌
@@ -73,7 +72,9 @@ class EnhancedBot(commands.Bot):
             conversation_cog = self.get_cog('Conversation')
             if conversation_cog and hasattr(conversation_cog, 'llm_handler'):
                 from utils.llm_handler import LLMHandler
-                conversation_cog.llm_handler = LLMHandler(self.user.name if self.user else "Discord Bot")
+                replacement = LLMHandler(self.user.name if self.user else "Discord Bot")
+                await conversation_cog.llm_handler.close()
+                conversation_cog.llm_handler = replacement
                 logger.info("🔄 LLM Handler 重新初始化完成")
             
             # 5. 更新 bot 前綴（如果改變了）
@@ -138,14 +139,6 @@ async def on_ready():
             
     except Exception as e:
         logger.error(f"❌ 同步斜線指令失敗: {e}")
-        # 嘗試清除並重新同步
-        try:
-            logger.info("🔄 嘗試清除並重新同步斜線指令...")
-            bot.tree.clear_commands(guild=None)
-            slash_commands = await bot.tree.sync()
-            logger.info(f"✅ 重新同步完成: {len(slash_commands)} 個斜線指令")
-        except Exception as retry_e:
-            logger.error(f"❌ 重新同步也失敗了: {retry_e}")
     
     # 設置機器人狀態
     await bot.change_presence(
@@ -195,7 +188,7 @@ async def on_command_error(ctx, error):
         if ctx.interaction:
             # 斜線指令錯誤處理
             if ctx.interaction.response.is_done():
-                await ctx.followup.send(message, ephemeral=True)
+                await ctx.interaction.followup.send(message, ephemeral=True)
             else:
                 await ctx.send(message, ephemeral=True)
         else:

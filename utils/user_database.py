@@ -331,14 +331,14 @@ class UserDatabase:
                         SELECT interaction_type, content, metadata, created_at 
                         FROM user_interactions 
                         WHERE user_id = ? AND interaction_type = ? 
-                        ORDER BY created_at DESC LIMIT ?
+                        ORDER BY created_at DESC, id DESC LIMIT ?
                     ''', (user_id, interaction_type, limit))
                 else:
                     cursor.execute('''
                         SELECT interaction_type, content, metadata, created_at 
                         FROM user_interactions 
                         WHERE user_id = ? 
-                        ORDER BY created_at DESC LIMIT ?
+                        ORDER BY created_at DESC, id DESC LIMIT ?
                     ''', (user_id, limit))
                 
                 results = cursor.fetchall()
@@ -358,6 +358,53 @@ class UserDatabase:
         except sqlite3.Error as e:
             logger.error(f"獲取用戶互動記錄失敗: {e}")
             return []
+
+    def get_conversation_turns(self, user_id: str, channel_id: str = None, limit: int = None) -> List[Dict]:
+        """讀取持久對話，先篩選頻道再限制筆數，依時間由舊到新返回。"""
+        if limit is not None and limit <= 0:
+            return []
+        turns = []
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT content, metadata FROM user_interactions "
+                "WHERE user_id = ? AND interaction_type = 'conversation_turn' ORDER BY id DESC",
+                (user_id,),
+            )
+            for content, metadata in rows:
+                try:
+                    meta = json.loads(metadata or '{}')
+                    turn = json.loads(content)
+                    if channel_id is not None and str(meta.get('channel_id')) != str(channel_id):
+                        continue
+                    if not isinstance(turn, dict) or not all(k in turn for k in ('timestamp', 'user_message', 'ai_response')):
+                        continue
+                    turns.append({**turn, 'channel_id': str(meta.get('channel_id', ''))})
+                    if limit is not None and len(turns) >= limit:
+                        break
+                except (ValueError, TypeError, AttributeError):
+                    continue
+        return list(reversed(turns))
+
+    def delete_old_conversation_turns(self, user_id: str, channel_id: str, cutoff: datetime) -> int:
+        """僅刪除指定用戶與頻道在截止時間前的對話。"""
+        from datetime import timezone
+        cutoff = cutoff.astimezone(timezone.utc)
+        ids = []
+        with sqlite3.connect(self.db_path) as conn:
+            for row_id, content, metadata in conn.execute(
+                "SELECT id, content, metadata FROM user_interactions "
+                "WHERE user_id = ? AND interaction_type = 'conversation_turn'", (user_id,)
+            ):
+                try:
+                    if str(json.loads(metadata or '{}').get('channel_id')) != str(channel_id):
+                        continue
+                    timestamp = datetime.fromisoformat(json.loads(content)['timestamp'].replace('Z', '+00:00'))
+                    if timestamp.astimezone(timezone.utc) <= cutoff:
+                        ids.append((row_id,))
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    continue
+            conn.executemany('DELETE FROM user_interactions WHERE id = ?', ids)
+        return len(ids)
     
     def get_user_info(self, user_id: str) -> Optional[Dict]:
         """獲取用戶完整資訊"""

@@ -27,15 +27,18 @@ class VectorDB:
         self._save()
 
     def search(self, user_id: Optional[str], channel_id: Optional[str], embedding: np.ndarray, top_k=5) -> List[Dict]:
-        if self.index.ntotal == 0:
+        if self.index.ntotal == 0 or top_k <= 0:
             return []
-        D, I = self.index.search(np.expand_dims(embedding, 0), top_k)
+        # 在全體候選中依距離篩選，避免其他用戶的向量擠掉符合權限的結果。
+        D, I = self.index.search(np.expand_dims(np.asarray(embedding, dtype=np.float32), 0), self.index.ntotal)
         results = []
         for idx in I[0]:
-            if idx < len(self.meta):
+            if 0 <= idx < len(self.meta):
                 m = self.meta[idx]
                 if (user_id is None or m["user_id"] == user_id) and (channel_id is None or m["channel_id"] == channel_id):
                     results.append(m)
+                    if len(results) >= top_k:
+                        break
         return results
 
     def _save(self):

@@ -3,6 +3,11 @@
 *.env.*
 
 ## Python
+.venv/
+venv/
+.pytest_cache/
+.pytest_*/
+.ruff_cache/
 __pycache__/
 *.pyc
 *.pyo
@@ -35,3 +40,4 @@ Lavalink/*_backup.jar
 
 ## 測試 & 暫存
 test_*.py
+!tests/test_*.py
