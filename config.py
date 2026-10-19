@@ -14,6 +14,11 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 print(f"TOKEN 載入狀態: {'✅ 已載入' if TOKEN else '❌ 未載入'}")
 PREFIX = '!'
 
+# 本機音樂服務（僅支援 loopback 網址）
+LAVALINK_URI = os.getenv('LAVALINK_URI', 'http://127.0.0.1:2333')
+LAVALINK_PASSWORD = os.getenv('LAVALINK_PASSWORD', 'youshallnotpass')
+LAVALINK_CONNECT_TIMEOUT = float(os.getenv('LAVALINK_CONNECT_TIMEOUT', '10'))
+
 # 圖片生成 API 設定
 IMAGE_API_KEY = os.getenv('IMAGE_API_KEY')
 IMAGE_API_URL = "https://api.example.com/generate"  # 替換為實際的 API URL

@@ -647,6 +647,13 @@ async def main():
     finally:
         # 清理資源
         logger.info("🧹 正在清理資源...")
+
+        try:
+            import wavelink
+            for node in list(wavelink.Pool.nodes.values()):
+                await node.close(eject=True)
+        except Exception as error:
+            logger.warning('關閉音樂節點時出錯: %s', error)
         
         # 清理 Lavalink 管理器的 HTTP session
         try:
@@ -667,6 +674,9 @@ async def main():
         if not bot.is_closed():
             await bot.close()
             logger.info("🤖 機器人連接已關閉")
+
+        from utils.local_lavalink import local_lavalink
+        await local_lavalink.close()
         
         logger.info("🔚 所有資源清理完成")
 

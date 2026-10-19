@@ -8,6 +8,8 @@ venv/
 .pytest_cache/
 .pytest_*/
 .ruff_cache/
+.runtime/
+Lavalink/plugins-local/
 __pycache__/
 *.pyc
 *.pyo

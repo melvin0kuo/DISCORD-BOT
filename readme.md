@@ -10,7 +10,7 @@
 | 模組 | 功能 |
 |------|------|
 | 🤖 **AI 對話** | Gemini 2.0 Flash 驅動，DM / 提及 / 回覆皆可觸發，含 prompt injection 防護 |
-| 🎵 **音樂播放** | YouTube · SoundCloud · Bandcamp；循環、隨機、歷史；Lavalink 伺服器自動切換 |
+| 🎵 **音樂播放** | YouTube · SoundCloud · Bandcamp；循環、隨機、歷史；本機 Lavalink |
 | 🧠 **對話記憶** | SQLite 持久化每位用戶的對話歷史、摘要與主題洞察 |
 | 👤 **用戶管理** | 個人資料、標籤系統、互動記錄 |
 | 🔄 **熱重載** | `DEV_MODE=True` 時，`.py` 儲存後 1.5 秒內自動重載 |
@@ -108,11 +108,19 @@ GEMINI_API_KEY=your_gemini_api_key
 
 其餘選填項目參考 [`config.py`](config.py)。
 
-### 4. 安裝 Java 17+
+### 4. 準備本機音樂服務
+
+Windows 啟動腳本會自動下載並驗證可攜式 Java 21，以及 YouTube 插件。
+Java 放在專案的 `.runtime/`，不修改系統 PATH；插件放在 `Lavalink/plugins-local/`。
+這些執行檔不會提交到 GitHub。已有 Java 的其他系統可執行：
+
+```bash
+python setup_local_lavalink.py
+```
 
 | 系統 | 安裝方式 |
 |------|---------|
-| Windows | 至 [Adoptium](https://adoptium.net/) 下載 Temurin 21 LTS |
+| Windows | 啟動腳本自動準備可攜式 Temurin 21 JRE |
 | Ubuntu / Debian | `sudo apt install openjdk-21-jre` |
 | macOS | `brew install openjdk@21` |
 
@@ -125,13 +133,15 @@ GEMINI_API_KEY=your_gemini_api_key
 start_with_lavalink.bat
 ```
 
-腳本會先在新視窗中啟動 Lavalink，等待 8 秒後再啟動 Bot。
+腳本會先準備執行環境，再啟動 Bot。Bot 會在背景啟動本機 Lavalink，
+等待 API 與 WebSocket 就緒後才啟用音樂功能；已有正常運行的本機服務時直接沿用。
+可透過 `DISCORD_BOT_PYTHON` 指定 Python 路徑；預設優先使用 Conda 的 `discord` 環境。
 
 #### 方式 B — 分別啟動
 
 ```bash
-# 終端 1：啟動 Lavalink
-cd lavalink
+# 終端 1：已有 Java 時可手動啟動 Lavalink
+cd Lavalink
 java -jar Lavalink.jar
 
 # 終端 2：確認 Lavalink 就緒後啟動 Bot
@@ -157,7 +167,8 @@ DISCORD-BOT/
 │
 ├── utils/
 │   ├── llm_handler.py                   # Gemini API 呼叫 & 對話歷史
-│   ├── lavalink_manager.py              # Lavalink 伺服器自動探索 & 切換
+│   ├── lavalink_manager.py              # 本機 Lavalink API 驗證與狀態
+│   ├── local_lavalink.py                # 可攜式 Java、插件安裝與程序管理
 │   ├── user_database.py                 # SQLite 用戶資料存取
 │   ├── conversation_memory.py           # 對話持久化 & 摘要
 │   └── reloader.py                      # watchdog 熱重載
@@ -193,9 +204,9 @@ DISCORD-BOT/
 | 指令 | 說明 |
 |------|------|
 | `/lavalink_status` | 查看目前節點狀態 |
-| `/switch_lavalink` | 手動切換伺服器 |
+| `/switch_lavalink` | 重新連接本機節點（相容舊指令） |
 | `/reconnect_lavalink` | 重新連接 |
-| `/update_servers` | 從網路更新伺服器清單 |
+| `/update_servers` | 重新檢查本機節點狀態 |
 
 ### 用戶系統
 
@@ -220,18 +231,23 @@ DISCORD-BOT/
 
 ## Lavalink 設定
 
-設定檔位於 [`lavalink/application.yml`](lavalink/application.yml)，預設值：
+設定檔位於 [`Lavalink/application.yml`](Lavalink/application.yml)，預設值：
 
 ```yaml
 server:
   port: 2333
+  address: 127.0.0.1
 
 lavalink:
   server:
     password: "youshallnotpass"
 ```
 
-若修改密碼，需同步更新 `.env` 中的 `LAVALINK_PASSWORD`。
+Bot 僅連接本機節點，不抓取公共節點清單，也不沿用舊公共節點快取。
+`.env` 可設定 `LAVALINK_URI=http://127.0.0.1:2333` 與 `LAVALINK_PASSWORD`；
+Bot 自動啟動服務時會將連線位址、連接埠和密碼同步傳入 JVM。
+手動啟動 Java 時，需確保設定檔的連接埠和密碼與 `.env` 相同。
+啟動問題可查看 `Lavalink/local-runtime.log`；播放器需保持外網連線以取得歌曲。
 
 ### 公開伺服器自動備援
 

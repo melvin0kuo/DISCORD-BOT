@@ -10,6 +10,9 @@ from typing import List, Optional
 import time
 import json
 import os
+import importlib
+import config
+from utils.local_lavalink import local_lavalink
 
 # 添加 Wavelink 異常處理
 from wavelink.exceptions import LavalinkException
@@ -365,6 +368,18 @@ class EnhancedMusic(commands.Cog):
         self.ensure_data_dir()
         self.load_playlists()
         self.load_autoplay_config()
+
+    async def cog_load(self):
+        # 熱重載時一併替換舊的公共節點管理器，並釋放其 HTTP session。
+        global lavalink_manager
+        for node in list(wavelink.Pool.nodes.values()):
+            await node.close(eject=True)
+        if lavalink_manager:
+            await lavalink_manager.close_session()
+        module = importlib.reload(importlib.import_module('utils.lavalink_manager'))
+        lavalink_manager = module.lavalink_manager
+        if self.bot.is_ready():
+            await self.connect_to_lavalink()
         
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
@@ -595,97 +610,69 @@ class EnhancedMusic(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         """當 cog 準備就緒時初始化 Wavelink"""
-        if not wavelink.Pool.nodes:
-            await self.connect_to_lavalink()
+        await self.connect_to_lavalink()
         
         logger.info("✅ Enhanced Music cog 已準備就緒")
 
     @staticmethod
-    def _make_node(uri: str, password: str, identifier: str) -> wavelink.Node:
+    def _make_node(uri: str, password: str, identifier: str, session=None) -> wavelink.Node:
         """統一建立 wavelink Node，確保參數與最新 API 一致"""
         return wavelink.Node(
             uri=uri,
             password=password,
             identifier=identifier,
+            session=session,
+            retries=1,
             resume_timeout=60,
             inactive_player_timeout=300,   # 靜止 300 秒觸發 inactive 事件
             inactive_channel_tokens=3,     # 空頻道播完 3 首後觸發
         )
 
-    async def connect_to_lavalink(self):
-        """連接到 Lavalink 伺服器（加鎖防競態、智能選擇 + 逐一備用）"""
-        # 防止同時有兩個 on_ready / 重連流程同時搶著建立節點
-        if self._connect_lock.locked():
-            logger.info("⏳ 已有另一個連線程序進行中，跳過重複呼叫")
-            return False
-
+    async def connect_to_lavalink(self, force=False):
+        """只連接本機節點，清理殘留節點並等待 WebSocket ready。"""
         async with self._connect_lock:
-            # 再次確認是否已有可用節點（等待期間可能已連線）
-            if wavelink.Pool.nodes:
-                logger.info("✅ 節點已存在，跳過重複連線")
+            uri = config.LAVALINK_URI.rstrip('/')
+            ready = None
+            for existing in list(wavelink.Pool.nodes.values()):
+                if not force and existing.uri.rstrip('/') == uri and existing.status == wavelink.NodeStatus.CONNECTED:
+                    ready = existing
+                else:
+                    try:
+                        await existing.close(eject=True)
+                    except Exception as error:
+                        logger.warning('清理舊節點失敗: %s', error)
+                        return False
+            if ready:
                 return True
-
-            if lavalink_manager:
-                try:
-                    logger.info("🔍 正在搜尋最佳 Lavalink 伺服器...")
-                    await lavalink_manager.update_server_list()
-                    best_server = await lavalink_manager.get_best_server()
-                    if best_server:
-                        node = self._make_node(best_server.uri, best_server.password, f"node_{int(time.time())}")
-                        await wavelink.Pool.connect(nodes=[node], client=self.bot, cache_capacity=100)
-                        lavalink_manager.current_server = best_server
-                        logger.info(f"✅ 已連接到 Lavalink 伺服器: {best_server.name} ({best_server.version})")
-                        return True
-                    else:
-                        logger.warning("⚠️ 智能選擇未找到可用伺服器，逐一嘗試備用清單...")
-                except Exception as e:
-                    logger.error(f"❌ 智能連接失敗: {e}，逐一嘗試備用清單...")
-
-            # 逐一嘗試備用伺服器
-            for fallback in (lavalink_manager.FALLBACK_SERVERS if lavalink_manager else []):
-                try:
-                    node = self._make_node(fallback.uri, fallback.password, f"node_{int(time.time())}")
-                    await wavelink.Pool.connect(nodes=[node], client=self.bot, cache_capacity=100)
-                    lavalink_manager.current_server = fallback
-                    logger.info(f"✅ 備用連接成功: {fallback.name}")
-                    return True
-                except Exception as e:
-                    logger.warning(f"備用伺服器 {fallback.name} 連接失敗: {e}")
-                    continue
-
-            logger.error("❌ 所有 Lavalink 伺服器均無法連接")
-            return False
+            if not lavalink_manager or not await local_lavalink.ensure_started():
+                logger.error('本機音樂服務未啟動，請執行 start_with_lavalink.bat')
+                return False
+            await lavalink_manager.update_server_list()
+            server = await lavalink_manager.get_best_server()
+            if server is None:
+                logger.error('本機 Lavalink API 驗證失敗')
+                return False
+            session = await lavalink_manager._get_session()
+            node = self._make_node(server.uri, server.password, 'local-lavalink', session=session)
+            try:
+                await asyncio.wait_for(wavelink.Pool.connect(nodes=[node], client=self.bot),
+                                       timeout=config.LAVALINK_CONNECT_TIMEOUT)
+                deadline = asyncio.get_running_loop().time() + config.LAVALINK_CONNECT_TIMEOUT
+                while node.status != wavelink.NodeStatus.CONNECTED:
+                    if asyncio.get_running_loop().time() >= deadline:
+                        raise TimeoutError('本機 Lavalink 未回傳 WebSocket ready')
+                    await asyncio.sleep(0.05)
+                lavalink_manager.current_server = server
+                logger.info('✅ 已連接本機 Lavalink: %s', server.uri)
+                return True
+            except Exception as error:
+                logger.error('本機 Lavalink 連線失敗: %s', error)
+                await node.close(eject=True)
+                return False
 
     async def switch_lavalink_server(self):
-        """切換 Lavalink 伺服器"""
-        if not lavalink_manager:
-            return False
-
-        try:
-            logger.info("🔄 正在切換 Lavalink 伺服器...")
-
-            # eject=True 讓 wavelink 在 close 時從 Pool 內部 __nodes 移除該節點
-            for node in list(wavelink.Pool.nodes.values()):
-                try:
-                    await node.close(eject=True)
-                except Exception as e:
-                    logger.warning(f"關閉節點 {node.identifier} 時出錯: {e}")
-
-            # 取得下一個可用伺服器
-            next_server = await lavalink_manager.get_next_server()
-            if next_server:
-                new_node = self._make_node(next_server.uri, next_server.password, f"node_{int(time.time())}")
-                await wavelink.Pool.connect(nodes=[new_node], client=self.bot, cache_capacity=100)
-                lavalink_manager.current_server = next_server
-                logger.info(f"✅ 已切換到: {next_server.name} ({next_server.version})")
-                return True
-            else:
-                logger.error("❌ 沒有可用的替代伺服器，嘗試重新連接...")
-                return await self.connect_to_lavalink()
-
-        except Exception as e:
-            logger.error(f"❌ 切換伺服器失敗: {e}")
-            return False
+        """相容舊指令：重新連接本機服務，不使用公共伺服器。"""
+        return await self.connect_to_lavalink(force=True)
 
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload):
@@ -702,12 +689,7 @@ class EnhancedMusic(commands.Cog):
             f"斷線 players={len(disconnected)} | "
             f"剩餘 nodes={list(wavelink.Pool.nodes.keys())}"
         )
-        await asyncio.sleep(3)
-        if not wavelink.Pool.nodes:
-            logger.info("🔄 節點全滅，嘗試自動重新連接...")
-            success = await self.connect_to_lavalink()
-            if not success:
-                logger.error("❌ 自動重連失敗，音樂功能暫時不可用")
+        # WebSocket 只做有限次重連；刻意 close 不再觸發另一條無限重連鏈。
 
     @commands.Cog.listener()
     async def on_wavelink_inactive_player(self, player: wavelink.Player):
@@ -2094,12 +2076,13 @@ class EnhancedMusic(commands.Cog):
             await ctx.send("❌ Lavalink 伺服器管理器未啟用")
             return
         
-        msg = await ctx.send("📡 正在更新 Lavalink 伺服器清單...")
+        msg = await ctx.send("🔍 正在檢查本機 Lavalink...")
         
         try:
             await lavalink_manager.update_server_list(force=True)
+            await lavalink_manager.get_best_server()
             status = lavalink_manager.get_server_status_summary()
-            await msg.edit(content=f"✅ 伺服器清單更新完成！找到 {status['total']} 個伺服器")
+            await msg.edit(content=f"本機 Lavalink：{'✅ 可用' if status['online'] else '❌ 未就緒'}")
         except Exception as e:
             logger.error(f"更新伺服器清單失敗: {e}")
             await msg.edit(content=f"❌ 更新失敗: {e}")

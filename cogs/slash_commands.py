@@ -17,7 +17,7 @@ class SlashCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         
-    @commands.hybrid_command(name="switch_lavalink", description="切換到另一個 Lavalink 伺服器")
+    @commands.hybrid_command(name="switch_lavalink", description="重新連接本機 Lavalink 節點")
     @app_commands.describe(force="是否強制切換（即使當前連接正常）")
     async def switch_lavalink(self, ctx: commands.Context, force: bool = False):
         """切換 Lavalink 伺服器（支援斜線指令和 prefix 指令）"""
@@ -56,7 +56,7 @@ class SlashCommands(commands.Cog):
                 )
                 embed.add_field(
                     name="💡 提示",
-                    value="如果要強制切換伺服器，請使用 `force=True` 參數",
+                    value="目前使用本機節點。強制重新連接請使用 `force=True`。",
                     inline=False
                 )
                 await send_func(embed=embed)
@@ -64,7 +64,7 @@ class SlashCommands(commands.Cog):
             
             # 嘗試切換伺服器
             embed = discord.Embed(
-                title="🔄 正在切換 Lavalink 伺服器",
+                title="🔄 正在重新連接本機 Lavalink",
                 description="請稍候...",
                 color=discord.Color.orange()
             )
@@ -82,8 +82,8 @@ class SlashCommands(commands.Cog):
                             break
                 
                 embed = discord.Embed(
-                    title="✅ 伺服器切換成功",
-                    description=f"已切換到: **{new_status}**",
+                    title="✅ 本機節點已重新連接",
+                    description=f"目前節點: **{new_status}**",
                     color=discord.Color.green()
                 )
                 embed.add_field(
@@ -94,7 +94,7 @@ class SlashCommands(commands.Cog):
             else:
                 embed = discord.Embed(
                     title="❌ 伺服器切換失敗",
-                    description="無法找到可用的替代伺服器",
+                    description="本機 Lavalink 暫時無法連接，請檢查 Lavalink/local-runtime.log。",
                     color=discord.Color.red()
                 )
                 embed.add_field(
@@ -270,7 +270,7 @@ class SlashCommands(commands.Cog):
             )
             await send_func(embed=embed)
     
-    @commands.hybrid_command(name="reconnect_lavalink", description="重新連接到最佳 Lavalink 伺服器")
+    @commands.hybrid_command(name="reconnect_lavalink", description="重新連接本機 Lavalink 服務")
     @commands.is_owner()
     async def reconnect_lavalink(self, ctx: commands.Context):
         """重新連接 Lavalink（支援斜線指令和 prefix 指令，僅限擁有者）"""
@@ -294,20 +294,13 @@ class SlashCommands(commands.Cog):
             
             embed = discord.Embed(
                 title="🔌 正在重新連接 Lavalink",
-                description="正在斷開現有連接並重新連接到最佳伺服器...",
+                description="正在重新連接本機音樂服務...",
                 color=discord.Color.orange()
             )
             msg = await send_func(embed=embed)
             
-            # 關閉所有現有節點（Pool.nodes 是唯讀 mapping，必須逐一 close）
-            for node in list(wavelink.Pool.nodes.values()):
-                try:
-                    await node.close()
-                except Exception:
-                    pass
-            
             # 重新連接
-            success = await music_cog.connect_to_lavalink()
+            success = await music_cog.connect_to_lavalink(force=True)
             
             if success:
                 # 獲取新連接狀態
