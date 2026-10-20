@@ -9,6 +9,7 @@ import logging
 from utils.llm_handler import LLMHandler
 from utils.user_database import user_db
 from utils import music_intents
+from utils.attachment_reader import collect_attachments
 
 logger = logging.getLogger("discord")
 
@@ -93,7 +94,7 @@ class Conversation(commands.Cog):
                 await message.channel.send(rejection_response)
                 return
 
-            if not content and not message.attachments:
+            if not content and not message.attachments and not message.reference:
                 await message.channel.send(f"{random.choice(self.greetings)}，有什麼我能幫你的嗎？")
                 return
             logger.info(f"用戶 {message.author.name} ({message.author.id}) 的訊息: {content}")
@@ -156,7 +157,9 @@ class Conversation(commands.Cog):
                     )
                     logger.info(f"向量資料庫檢索完成，context: {bool(vector_context)}")
                     
-                    parts = await self.llm_handler.build_gemini_parts(content, message.attachments)
+                    attachments = await collect_attachments(message)
+                    parts = await self.llm_handler.build_gemini_parts(content, attachments)
+                    attachment_question = '\n\n'.join(part['text'] for part in parts if 'text' in part)
                     
                     # 組合所有上下文資訊
                     context_blocks = []
@@ -200,7 +203,7 @@ class Conversation(commands.Cog):
                         message.channel,
                         self.llm_handler.get_llm_response_stream(
                             str(message.author.id), channel_id, parts,
-                            user_message=content, user_context=full_context,
+                            user_message=attachment_question, user_context=full_context,
                             request_tools=self.music_intents.tools_for(message),
                             request_instructions=self.music_intents.instructions_for(message),
                         ),

@@ -196,15 +196,9 @@ class LLMHandler:
             return ""
 
     async def build_gemini_parts(self, text: str, attachments: list) -> list:
-        """建構多模態 Parts"""
-        parts = []
-        if text: parts.append({"text": text})
-        for att in attachments:
-            file_bytes = await att.read()
-            mime = att.content_type or ""
-            if mime.startswith("image/") or mime in ["application/pdf", "text/plain"]:
-                parts.append({"inline_data": {"mime_type": mime, "data": file_bytes}})
-        return parts
+        """建構兩種模型後端共用的附件內容。"""
+        from utils.attachment_reader import build_attachment_parts
+        return await build_attachment_parts(text, attachments)
 
     def _init_gemini_client(self):
         """初始化 Gemini"""

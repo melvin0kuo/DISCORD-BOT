@@ -1,4 +1,7 @@
 discord.py>=2.7.1
+pypdf>=6.0.0
+python-docx>=1.2.0
+openpyxl>=3.1.5
 wavelink>=3.5.2  # Discord 音樂播放（Lavalink Python 客戶端）
 python-dotenv>=0.19.0
 requests>=2.26.0
