@@ -173,7 +173,7 @@ class LLMHandler:
                 tag_list = [f"{t['name']}: {t['value']}" if t['value'] else t['name'] for t in tags[:15]]
                 context_parts.append(f"【{user_display_name}({user_mention})的標籤】{', '.join(tag_list)}")
             
-            if channel_id:
+            if channel_id and not self._get_user_history(user_id, channel_id):
                 conversation_context = conversation_memory.get_conversation_context(user_id, channel_id, 5)
                 if conversation_context:
                     context_parts.append(f"【{user_display_name}({user_mention})的最近對話】{conversation_context}")
@@ -281,6 +281,11 @@ class LLMHandler:
 
                     try:
                         obj = json.loads(data_str)
+                        if obj.get('error'):
+                            error = obj['error']
+                            if isinstance(error, dict) and error.get('type') == 'exceed_context_size_error':
+                                raise RuntimeError('LM Studio HTTP 400: 輸入超過模型上下文上限')
+                            raise RuntimeError('LM Studio 串流回傳錯誤，請檢查模型服務')
                         if not obj.get("choices"):
                             continue
 
@@ -305,6 +310,8 @@ class LLMHandler:
 
                     except json.JSONDecodeError:
                         continue
+                    except RuntimeError:
+                        raise
                     except Exception as e:
                         logger.debug(f"[SSE] 解析 Chunk 出錯: {e}")
                         continue
@@ -439,11 +446,24 @@ class LLMHandler:
         history = self._get_user_history(user_id, channel_id)
 
         system = self._get_request_system_prompt()
+        document_request = '【附件：' in message or '附件圖片：' in message
+        document_followup = any('【附件：' in h['content'] or '附件圖片：' in h['content'] for h in history[:-1])
+        if document_request:
+            system += '\n本輪附件已由程式擷取或傳入。請根據本輪附件內容回答，不要沿用歷史對話中「無法讀取附件」的說法；若有讀取失敗或範圍限制，必須如實說明。'
         if user_context:
-            system += f"\n\n[用戶資訊]\n{user_context}"
+            context = user_context[:2000 if document_request or document_followup else 4000]
+            system += f"\n\n[用戶資訊]\n{context}"
 
         messages = [{"role": "system", "content": system}]
-        for h in history[:-1]:
+        prior = [] if document_request else list(history[:-1])
+        # Keep recent whole turns, without cutting the current document/question.
+        # This is a character heuristic; model-side token errors remain explicit.
+        history_budget = max(0, getattr(config, 'LMSTUDIO_CONTEXT_LENGTH', 32768) // 2 - len(system) - len(message))
+        while prior and sum(len(h['content']) for h in prior) > history_budget:
+            prior.pop(0)
+            while prior and prior[0]['role'] != 'user':
+                prior.pop(0)
+        for h in prior:
             messages.append({"role": "user" if h["role"] == "user" else "assistant", "content": h["content"]})
 
         user_content = message
@@ -652,7 +672,10 @@ class LLMHandler:
                     raise
         except Exception as e:
             logger.error(f"LLM 串流錯誤: {e}")
-            yield '❌ 模型暫時無法回應，請稍後再試。'
+            if '上下文' in str(e):
+                yield '❌ 文件與對話總長度超過模型上下文上限，請縮小文件範圍或另開對話後再試。'
+            else:
+                yield '❌ 模型暫時無法回應，請稍後再試。'
         finally:
             if successful:
                 self.add_to_history(user_id, channel_id, 'assistant', collected)

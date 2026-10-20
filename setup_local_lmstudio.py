@@ -21,9 +21,14 @@ def ensure_lmstudio(identifier, model_key, context_length):
     subprocess.run([cli, 'server', 'start', '--bind', '127.0.0.1', '--port', '1234'], **options)
     result = subprocess.run([cli, 'ps', '--json'], **options)
     loaded = json.loads(result.stdout)
-    if not any(model.get('identifier') == identifier for model in loaded):
+    existing = next((model for model in loaded if model.get('identifier') == identifier), None)
+    if existing and (existing.get('contextLength', context_length) < context_length
+                     or existing.get('parallel', 1) != 1):
+        subprocess.run([cli, 'unload', identifier], **options)
+        existing = None
+    if not existing:
         subprocess.run([cli, 'load', model_key, '--identifier', identifier,
-                        '--context-length', str(context_length), '--gpu', 'max', '--yes'], **options)
+                        '--context-length', str(context_length), '--gpu', 'max', '--parallel', '1', '--yes'], **options)
     print(f'LM Studio 已就緒: {identifier} / http://127.0.0.1:1234', flush=True)
 
 

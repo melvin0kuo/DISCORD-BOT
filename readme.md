@@ -141,12 +141,12 @@ ENABLE_FALLBACK=false
 LMSTUDIO_API_URL=http://127.0.0.1:1234
 LMSTUDIO_MODEL=discord-local
 LMSTUDIO_MODEL_KEY=qwen/qwen3.5-9b
-LMSTUDIO_CONTEXT_LENGTH=8192
+LMSTUDIO_CONTEXT_LENGTH=32768
 LMSTUDIO_ENABLE_THINKING=false
 ```
 
 `LMSTUDIO_MODEL_KEY` 是已下載的模型名稱；`LMSTUDIO_MODEL` 是提供給機器人的固定 API 識別名稱。
-可依硬體改用其他支援工具呼叫的模型。本機部署已實測 Qwen3.6 27B Q6_K、8192 context，使用 RTX 5090 32GB。
+可依硬體改用其他支援工具呼叫的模型。本機部署使用 Qwen3.6 27B Q6_K、32768 context、單一並行請求，使用 RTX 5090 32GB。啟動腳本會在現有模型上下文不足時重新載入；閱讀新附件時，優先提供該文件並省略舊對話歷史，避免重複內容塞滿輸入。
 啟用 API 驗證時，另將 LM Studio 的 Token 填入 `LMSTUDIO_API_KEY`，不要提交 `.env`。
 
 執行 `start_with_lavalink.bat` 會啟動本機 API、載入模型並啟動音樂服務與機器人；

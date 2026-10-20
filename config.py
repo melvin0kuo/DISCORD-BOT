@@ -64,7 +64,7 @@ LMSTUDIO_API_URL = os.getenv('LMSTUDIO_API_URL', 'http://localhost:1234')
 LMSTUDIO_API_KEY = os.getenv('LMSTUDIO_API_KEY', '')
 LMSTUDIO_MODEL   = os.getenv('LMSTUDIO_MODEL', 'local-model')
 LMSTUDIO_MODEL_KEY = os.getenv('LMSTUDIO_MODEL_KEY', 'qwen/qwen3.5-9b')
-LMSTUDIO_CONTEXT_LENGTH = int(os.getenv('LMSTUDIO_CONTEXT_LENGTH', '8192'))
+LMSTUDIO_CONTEXT_LENGTH = int(os.getenv('LMSTUDIO_CONTEXT_LENGTH', '32768'))
 
 # 本地 LLM API 設定（舊版，保留相容性）
 USE_HALF_PRECISION = os.getenv('USE_HALF_PRECISION', 'True').lower() == 'true'
