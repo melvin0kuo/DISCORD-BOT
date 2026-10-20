@@ -26,6 +26,7 @@ async def test_reply_fetches_attachment_and_preserves_question():
     parts = await build_attachment_parts('請摘要', attachments)
     assert parts[0]['text'] == '請摘要'
     assert 'note.txt' in parts[1]['text'] and 'hello' in parts[1]['text']
+    assert '內容已截斷' not in parts[1]['text']
     channel.fetch_message.assert_awaited_once_with(20)
 
 
@@ -67,3 +68,11 @@ def test_pdf_without_text_is_explicit():
 
 def test_big5_text_is_not_misread_as_utf16():
     assert extract_document('a.txt', '繁體中文'.encode('big5')) == '繁體中文'
+
+
+def test_pdf_preserves_truncation_sentinel(monkeypatch):
+    import pypdf
+    from utils.attachment_reader import MAX_TEXT
+    page = SimpleNamespace(extract_text=lambda: '字' * (MAX_TEXT + 100))
+    monkeypatch.setattr(pypdf, 'PdfReader', lambda _: SimpleNamespace(is_encrypted=False, pages=[page]))
+    assert len(extract_document('a.pdf', b'placeholder')) > MAX_TEXT

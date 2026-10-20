@@ -317,6 +317,64 @@ class LLMHandler:
             logger.error(f"❌ LM Studio 連線出錯: {e}")
             raise
 
+    async def _stream_lmstudio_continued(self, url, payload, headers, tag=''):
+        """Continue token-limited text, without allowing continuation to execute tools."""
+        base_messages = list(payload['messages'])
+        answer = ''
+        current_payload = payload
+        for attempt in range(3):
+            finish = None
+            has_tools = False
+            round_text = ''
+            for context_retry in range(2):
+                try:
+                    async for text, tools, reason in self._stream_lmstudio_sse(
+                            url, current_payload, headers, tag=tag):
+                        round_text += text
+                        has_tools = has_tools or bool(tools)
+                        if attempt and tools:
+                            raise RuntimeError('續寫只能補充回答文字，不允許執行工具。')
+                        if reason:
+                            finish = reason
+                        yield text, tools, reason
+                    break
+                except RuntimeError as error:
+                    if not attempt or 'HTTP 400' not in str(error) or round_text or has_tools:
+                        raise
+                    if context_retry:
+                        yield '\n\n（對話內容已接近模型上下文上限，無法自動續寫。請另開對話並指定要展開的段落。）', None, 'stop'
+                        return
+                    # An otherwise valid continuation can exceed the context
+                    # window. Retry without older turns; preserve the complete
+                    # original question and system instructions.
+                    latest_user = next((m for m in reversed(base_messages) if m['role'] == 'user'), None)
+                    minimal = [m for m in base_messages if m['role'] == 'system']
+                    if latest_user:
+                        minimal.append(latest_user)
+                    current_payload = dict(current_payload)
+                    current_payload['messages'] = minimal + [
+                        {'role': 'assistant', 'content': answer[-1000:]},
+                        current_payload['messages'][-1],
+                    ]
+                    current_payload['max_tokens'] = min(payload.get('max_tokens', 2048), 512)
+            if finish != 'length':
+                return
+            if has_tools:
+                raise RuntimeError('工具呼叫被輸出上限截斷，未執行此操作；請縮短要求後重試。')
+            answer += round_text
+            if not round_text or attempt == 2:
+                yield '\n\n（回覆已達本次長度上限，請回覆「繼續」取得後續內容。）', None, 'stop'
+                return
+            logger.info('LM Studio 回覆達輸出上限，自動續寫第 %s 次', attempt + 1)
+            current_payload = {key: value for key, value in payload.items() if key != 'tools'}
+            current_payload['tool_choice'] = 'none'
+            # Retain the original question and recent answer, keeping repeated
+            # continuations from accumulating an unbounded context window.
+            current_payload['messages'] = base_messages + [
+                {'role': 'assistant', 'content': answer[-3000:]},
+                {'role': 'user', 'content': '接續剛才被長度限制中斷的回覆，直接從中斷處繼續，不要重複前文、不加開場白。只補充回答文字，不執行任何工具或操作。'},
+            ]
+
     async def _get_lmstudio_model_id(self) -> str:
         """動態取得當前載入的模型 ID"""
         if getattr(self, '_loaded_lmstudio_model', None):
@@ -415,7 +473,7 @@ class LLMHandler:
                 "temperature": getattr(config, "GEMINI_TEMPERATURE", 0.7), "max_tokens": getattr(config, "GEMINI_MAX_OUTPUT_TOKENS", 2048)
             }
             collected_tool_calls = {}; final_content = ""
-            async for text, tool_delta, _ in self._stream_lmstudio_sse(url, payload, headers, tag=f" R{round_idx+1}"):
+            async for text, tool_delta, _ in self._stream_lmstudio_continued(url, payload, headers, tag=f" R{round_idx+1}"):
                 if text:
                     final_content += text
                     if not guard_music:
