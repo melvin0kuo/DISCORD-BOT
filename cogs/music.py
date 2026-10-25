@@ -54,9 +54,9 @@ class MusicQueue:
                 self.history = self.history[-50:]
             logger.info(f"📜 已添加到歷史記錄: {track.title} (總計: {len(self.history)} 首)")
     
-    def get_next(self) -> Optional[wavelink.Playable]:
+    def get_next(self, *, ignore_track_loop=False) -> Optional[wavelink.Playable]:
         """獲取下一首音樂"""
-        if self.loop_mode == "track":
+        if self.loop_mode == "track" and not ignore_track_loop:
             # 單曲循環：返回歷史記錄中的最後一首（當前播放的歌曲）
             return self.history[-1] if self.history else None
         
@@ -121,11 +121,11 @@ class MusicControlView(discord.ui.View):
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary)
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         """跳過按鈕"""
-        if not self.player.current:
+        if not self.player.current and not self.music_cog.get_queue(interaction.guild.id).queue and interaction.guild.id not in self.music_cog._playback_active:
             await interaction.response.send_message("❌ 沒有正在播放的音樂", ephemeral=True)
             return
         try:
-            await self.player.stop()
+            await self.music_cog._skip_track(self.player)
             await interaction.response.send_message("⏭️ 已跳過", ephemeral=True)
         except Exception as e:
             logger.warning(f"[MusicControlView] skip 失敗: {e}")
@@ -136,9 +136,8 @@ class MusicControlView(discord.ui.View):
         """停止按鈕"""
         queue = self.music_cog.get_queue(interaction.guild.id)
         queue.clear()
-        self.music_cog._cancel_pending_playback(interaction.guild.id)
         try:
-            await self.player.stop()
+            await self.music_cog._stop_track(self.player)
             await interaction.response.send_message("⏹️ 已停止播放並清空佇列", ephemeral=True)
         except Exception as e:
             logger.warning(f"[MusicControlView] stop 失敗: {e}")
@@ -804,9 +803,14 @@ class EnhancedMusic(commands.Cog):
                 fallback = await resolve_youtube_fallback(track)
                 if self._playback_generation.get(guild_id, 0) != generation or not getattr(player, 'connected', True):
                     return
-                fallback.extras = {**dict(getattr(fallback, 'extras', {})), '_request_generation': generation}
-                self._playback_active[guild_id] = (generation, self._track_identity(fallback))
-                await player.play(fallback)
+                async with self._voice_locks.setdefault(guild_id, asyncio.Lock()):
+                    if (self._playback_generation.get(guild_id, 0) != generation
+                            or not getattr(player, 'connected', True)):
+                        return
+                    fallback.extras = {**dict(getattr(fallback, 'extras', {})), '_request_generation': generation}
+                    self._playback_active[guild_id] = (generation, self._track_identity(fallback))
+                    self._cancel_idle_disconnect(guild_id)
+                    await player.play(fallback)
                 logger.info('已切換原歌曲的 yt-dlp 音訊備援: %s', track.title)
                 return
             except Exception as error:
@@ -872,6 +876,9 @@ class EnhancedMusic(commands.Cog):
         if not self._is_current_track_event(guild_id, payload.track):
             return
         reason = str(payload.reason).lower()
+        failure_key = (self._playback_generation.get(guild_id, 0), self._track_identity(payload.track))
+        if self._fallback_attempts.get(guild_id) == failure_key:
+            return  # A failure may also produce finished/stopped while recovery is pending.
         if reason in ('loadfailed', 'load_failed'):
             await self._handle_track_failure(player, payload.track)
             return
@@ -879,13 +886,17 @@ class EnhancedMusic(commands.Cog):
             return
         lock = self._track_end_locks.setdefault(guild_id, asyncio.Lock())
         async with lock:
-            if player.current is not None or guild_id in self._playback_blocked:
+            if (not self._is_current_track_event(guild_id, payload.track)
+                    or self._fallback_attempts.get(guild_id) == failure_key
+                    or player.current is not None or guild_id in self._playback_blocked):
                 return
             queue = self.get_queue(guild_id)
             next_track = queue.get_next() if reason == 'finished' or queue.queue else None
             if not next_track and reason == 'finished' and self.get_autoplay_status(guild_id):
                 await self.auto_recommend_and_play(player)
-                if guild_id in self._playback_blocked or player.current is not None:
+                if (not self._is_current_track_event(guild_id, payload.track)
+                        or self._fallback_attempts.get(guild_id) == failure_key
+                        or guild_id in self._playback_blocked or player.current is not None):
                     return
                 next_track = queue.get_next()
             if next_track:
@@ -914,6 +925,8 @@ class EnhancedMusic(commands.Cog):
         try:
             guild_id = player.guild.id
             queue = self.get_queue(guild_id)
+            generation = self._playback_generation.get(guild_id, 0)
+            active = self._playback_active.get(guild_id)
             
             # 更新統計
             if guild_id not in self.autoplay_stats:
@@ -998,6 +1011,10 @@ class EnhancedMusic(commands.Cog):
                         logger.debug(f"備用搜尋失敗: {e}")
             
             # 將推薦歌曲加入佇列
+            if (self._playback_generation.get(guild_id, 0) != generation
+                    or self._playback_active.get(guild_id) != active
+                    or (active is not None and self._fallback_attempts.get(guild_id) == active)):
+                return False
             if recommended_track:
                 queue.add(recommended_track)
                 logger.info(f"📋 已將推薦歌曲加入佇列: {recommended_track.title}")
@@ -1326,7 +1343,7 @@ class EnhancedMusic(commands.Cog):
             return
         
         try:
-            next_track = queue.get_next()
+            next_track = queue.get_next(ignore_track_loop=True)
             if next_track:
                 await self._play_track(player, next_track, manual=True)
                 # get_next() 已經將歌曲添加到歷史記錄，這裡不需要重複添加
@@ -1337,34 +1354,49 @@ class EnhancedMusic(commands.Cog):
             logger.error(f"播放下一首失敗: {e}")
             await ctx.send(f"❌ 播放失敗: {e}")
 
+    async def _stop_track(self, player):
+        guild_id = player.guild.id
+        self._cancel_pending_playback(guild_id)
+        generation = self._playback_generation[guild_id]
+        async with self._voice_locks.setdefault(guild_id, asyncio.Lock()):
+            if self._playback_generation.get(guild_id) != generation:
+                return False
+            await player.stop()
+            self._schedule_idle_disconnect(player)
+        return True
+
+    async def _skip_track(self, player, amount=1):
+        guild_id = player.guild.id
+        queue = self.get_queue(guild_id)
+        if not player.current and not queue.queue and guild_id not in self._playback_active:
+            return False
+        self._cancel_pending_playback(guild_id)
+        for _ in range(max(0, amount - 1)):
+            if queue.queue:
+                queue.queue.pop(0)
+        next_track = queue.get_next(ignore_track_loop=True)
+        if next_track:
+            await self._play_track(player, next_track, manual=True)
+        else:
+            return await self._stop_track(player)
+        return True
+
     @commands.hybrid_command()
     async def skip(self, ctx, amount: int = 1):
         """跳過音樂"""
         player: wavelink.Player = ctx.voice_client
-        if not player or not player.current:
+        if not player:
             await ctx.send("❌ 沒有正在播放的音樂。")
             return
         
-        queue = self.get_queue(ctx.guild.id)
-        
-        if amount > 1:
-            # 跳過多首
-            skipped = 0
-            for _ in range(amount - 1):
-                if queue.queue:
-                    queue.queue.pop(0)
-                    skipped += 1
-                else:
-                    break
-            
-            await player.stop()
-            await ctx.send(f"⏭️ 已跳過 {skipped + 1} 首歌曲")
-        else:
-            await player.stop()
-            await ctx.send("⏭️ 已跳過當前音樂")
-            
-        # 確保停止後能自動播放下一首
-        logger.info(f"🔧 Skip 命令執行完成，停止當前播放器以觸發自動播放")
+        if not 1 <= amount <= 100:
+            await ctx.send('❌ 跳過首數必須是 1 到 100。')
+            return
+        skipped = min(amount, 1 + len(self.get_queue(ctx.guild.id).queue))
+        if not await self._skip_track(player, amount):
+            await ctx.send('❌ 沒有正在播放或等待載入的音樂。')
+            return
+        await ctx.send(f'⏭️ 已跳過 {skipped} 首歌曲')
 
     @commands.hybrid_command()
     async def back(self, ctx):
@@ -1382,15 +1414,14 @@ class EnhancedMusic(commands.Cog):
         # 獲取上一首歌曲（倒數第二首）
         previous_track = queue.history[-2]
         
-        # 將當前歌曲和上一首歌曲重新加入佇列前面
-        if player.current:
-            queue.queue.insert(0, player.current)
-        queue.queue.insert(0, previous_track)
+        # Directly replace playback; a stalled source may never emit stopped.
+        current_track = player.current or queue.history[-1]
+        queue.queue.insert(0, current_track)
         
         # 移除歷史記錄中的最後一首
         queue.history.pop()
         
-        await player.stop()
+        await self._play_track(player, previous_track, manual=True)
         await ctx.send("⏮️ 已返回上一首歌曲")
 
     @commands.hybrid_command()
@@ -1493,7 +1524,8 @@ class EnhancedMusic(commands.Cog):
         self._user_stopped.add(ctx.guild.id)   # 標記為使用者主動停止，避免快速斷線誤判
 
         try:
-            await player.disconnect()
+            async with self._voice_locks.setdefault(ctx.guild.id, asyncio.Lock()):
+                await player.disconnect()
             await ctx.send("⏹️ 已停止播放並離開語音頻道")
         except LavalinkException as e:
             logger.warning(f"⚠️ 斷線時 Lavalink 錯誤 (可忽略): {e}")
@@ -1516,7 +1548,8 @@ class EnhancedMusic(commands.Cog):
         self._user_stopped.add(ctx.guild.id)
 
         try:
-            await player.disconnect()
+            async with self._voice_locks.setdefault(ctx.guild.id, asyncio.Lock()):
+                await player.disconnect()
             await ctx.send("👋 已離開語音頻道。")
         except LavalinkException as e:
             logger.warning(f"⚠️ 斷線時 Lavalink 錯誤 (可忽略): {e}")

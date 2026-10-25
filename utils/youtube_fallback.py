@@ -59,6 +59,9 @@ async def resolve_youtube_fallback(original):
                 raise RuntimeError('備援音訊串流不可用')
             if not await response.content.read(4096):
                 raise RuntimeError('備援音訊內容為空')
+            # Lavalink's HTTP reader does not follow every CDN redirect. Pass
+            # the validated final URL that actually returned audio bytes.
+            url = validate_audio_url(str(response.url))
     tracks = await wavelink.Playable.search(url, source=None)
     if not tracks or isinstance(tracks, wavelink.Playlist):
         raise RuntimeError('Lavalink 無法載入備援音訊')
