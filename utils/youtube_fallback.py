@@ -62,7 +62,9 @@ async def resolve_youtube_fallback(original):
             # Lavalink's HTTP reader does not follow every CDN redirect. Pass
             # the validated final URL that actually returned audio bytes.
             url = validate_audio_url(str(response.url))
-    tracks = await wavelink.Playable.search(url, source=None)
+    from utils.audio_relay import audio_relay
+    relay_url = await audio_relay.add(url)
+    tracks = await wavelink.Playable.search(relay_url, source=None)
     if not tracks or isinstance(tracks, wavelink.Playlist):
         raise RuntimeError('Lavalink 無法載入備援音訊')
     raw = copy.deepcopy(tracks[0].raw_data)

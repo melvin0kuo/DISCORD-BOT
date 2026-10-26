@@ -33,6 +33,7 @@ def test_finished_event_during_fallback_must_not_advance_queue(memory_db, monkey
 
 def test_fallback_passes_final_redirect_url_to_lavalink(monkeypatch):
     import utils.youtube_fallback as fallback
+    from utils.audio_relay import audio_relay
     from unittest.mock import Mock
     async def run():
         original = SimpleNamespace(identifier='SZiwpL62to8', title='ANTIFRAGILE', author='LE SSERAFIM', uri='https://www.youtube.com/watch?v=SZiwpL62to8', artwork=None, length=180000, extras={})
@@ -42,11 +43,14 @@ def test_fallback_passes_final_redirect_url_to_lavalink(monkeypatch):
         session = SimpleNamespace(get=Mock(return_value=context))
         session_context = AsyncMock(); session_context.__aenter__.return_value = session
         monkeypatch.setattr(fallback.aiohttp, 'ClientSession', Mock(return_value=session_context))
+        relay = AsyncMock(return_value='http://127.0.0.1:12345/audio/token')
+        monkeypatch.setattr(audio_relay, 'add', relay)
         search = AsyncMock(return_value=[])
         monkeypatch.setattr(fallback.wavelink.Playable, 'search', search)
         with pytest.raises(RuntimeError,match='載入備援'):
             await fallback.resolve_youtube_fallback(original)
-        assert search.call_args.args[0] == 'https://b.googlevideo.com/final'
+        relay.assert_awaited_once_with('https://b.googlevideo.com/final')
+        assert search.call_args.args[0] == 'http://127.0.0.1:12345/audio/token'
     asyncio.run(run())
 
 

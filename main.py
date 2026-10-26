@@ -684,6 +684,8 @@ async def main():
         await local_lavalink.close()
         from utils.youtube_runtime import local_cipher
         await local_cipher.close()
+        from utils.audio_relay import audio_relay
+        await audio_relay.close()
         
         logger.info("🔚 所有資源清理完成")
 
