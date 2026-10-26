@@ -279,7 +279,8 @@ def test_request_tools_are_reset_before_yield_and_generator_can_close_in_another
             'control_music': {'callback': own, 'schema': {}},
         })
         try:
-            assert await anext(stream) == 'first chunk'
+            # The public boundary buffers output for credential / prompt screening.
+            assert await anext(stream) == 'first chunksecond chunk'
             assert await handler._execute_tool('control_music', {}) != 'private music tool'
         finally:
             await asyncio.create_task(stream.aclose())

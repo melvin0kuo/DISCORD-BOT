@@ -10,6 +10,7 @@ from utils.llm_handler import LLMHandler
 from utils.user_database import user_db
 from utils import music_intents
 from utils.attachment_reader import collect_attachments
+from utils.conversation_security import protected_request, REFUSAL
 
 logger = logging.getLogger("discord")
 
@@ -93,10 +94,15 @@ class Conversation(commands.Cog):
             if is_mentioned:
                 content = content.replace(f'<@{self.bot.user.id}>', '').replace(f'<@!{self.bot.user.id}>', '').strip()
 
-            # --- 基於 LLM 的智慧型 prompt injection 過濾 ---
-            if await self._is_prompt_injection(content):
-                rejection_response = await self.llm_handler.get_injection_rejection_response(content)
-                await message.channel.send(rejection_response)
+            # Identity is verified by Discord application ownership, never display names.
+            owner = False
+            try:
+                owner = await self.bot.is_owner(message.author)
+            except Exception:
+                logger.warning('無法確認擁有者，採用一般權限')
+            private_owner = owner and isinstance(message.channel, discord.DMChannel)
+            if protected_request(content) and not private_owner:
+                await message.channel.send('🔒 請在私訊中詢問受保護的實作資訊。' if owner else REFUSAL)
                 return
 
             if not content and not message.attachments and not message.reference:
@@ -148,6 +154,11 @@ class Conversation(commands.Cog):
                     
                     # 立即發送「思考中」，確保使用者知道機器人已收到訊息
                     sent_message = await message.channel.send("💬 思考中...")
+                    async def update_status(text):
+                        try:
+                            await sent_message.edit(content=text, allowed_mentions=discord.AllowedMentions.none())
+                        except Exception:
+                            logger.debug('處理狀態更新失敗', exc_info=True)
 
                     # 獲取發送訊息用戶的完整上下文（個人資料、標籤、記憶等）
                     logger.info("正在獲取用戶完整上下文...")
@@ -157,12 +168,15 @@ class Conversation(commands.Cog):
                     # 多模態：傳入文字與附件
                     # 先從向量資料庫取得相關前後文
                     logger.info("正在檢索向量資料庫...")
+                    await update_status('🧠 檢索相關記憶中...')
                     vector_context = await self.llm_handler.retrieve_context_from_vector_db(
                         str(message.author.id), channel_id, content, self.vector_db, top_k=3
                     )
                     logger.info(f"向量資料庫檢索完成，context: {bool(vector_context)}")
                     
                     attachments = await collect_attachments(message)
+                    if attachments:
+                        await update_status('📄 讀取文件／整理內容中...')
                     parts = await self.llm_handler.build_gemini_parts(content, attachments)
                     attachment_question = '\n\n'.join(part['text'] for part in parts if 'text' in part)
                     
@@ -204,6 +218,7 @@ class Conversation(commands.Cog):
                         logger.info(f"已添加完整上下文，總長度: {len(full_context)}")
                     
                     logger.info("開始生成 LLM 回應...")
+                    await update_status('💬 思考中...')
                     response_text = await self._stream_with_pagination(
                         message.channel,
                         self.llm_handler.get_llm_response_stream(
@@ -211,6 +226,8 @@ class Conversation(commands.Cog):
                             user_message=attachment_question, user_context=full_context,
                             request_tools=self.music_intents.tools_for(message),
                             request_instructions=self.music_intents.instructions_for(message),
+                            verified_owner=private_owner,
+                            status_callback=update_status,
                         ),
                         initial_msg=sent_message,
                     )
@@ -246,12 +263,12 @@ class Conversation(commands.Cog):
                 except Exception as e:
                     logger.error(f"生成回應時出錯: {e}", exc_info=True)
                     try:
-                        await message.channel.send(f"抱歉，生成回應時出現錯誤: {str(e)}")
+                        await message.channel.send('❌ 處理暫時失敗，請稍後重試。')
                     except:
                         logger.error("無法發送錯誤訊息")
         except Exception as e:
             logger.error(f"處理對話時出錯: {e}", exc_info=True)
-            await message.channel.send(f"❌ 處理訊息時出錯: {str(e)}")
+            await message.channel.send('❌ 處理訊息時出錯，請稍後重試。')
         finally:
             # 處理完成後移除訊息標記
             if message_key and message_key in self.processing_messages:

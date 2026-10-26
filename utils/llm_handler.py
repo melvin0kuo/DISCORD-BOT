@@ -81,6 +81,8 @@ class LLMHandler:
         self._conversation_locks = {}
         self._request_tools = ContextVar('llm_request_tools', default=None)
         self._request_instructions = ContextVar('llm_request_instructions', default='')
+        self._request_owner = ContextVar('llm_request_owner', default=False)
+        self._request_status = ContextVar('llm_request_status', default=None)
         self._local_vector_store = None
         self._memory_tasks = set()
 
@@ -731,16 +733,24 @@ class LLMHandler:
             self._gemini_quota_exceeded = False; return True
         return False
     
-    async def get_llm_response_stream(self, user_id: str, channel_id: str, parts_or_message, *, user_message=None, user_context="", request_tools=None, request_instructions="") -> AsyncGenerator[str, None]:
+    async def get_llm_response_stream(self, user_id: str, channel_id: str, parts_or_message, *, user_message=None, user_context="", request_tools=None, request_instructions="", verified_owner=False, status_callback=None) -> AsyncGenerator[str, None]:
         """統一的串流回應進入點"""
+        from utils.conversation_security import protected_request, sanitize_output, REFUSAL
+        question = user_message if user_message is not None else (parts_or_message if isinstance(parts_or_message, str) else '\n'.join(p.get('text','') for p in parts_or_message if isinstance(p,dict)))
+        if not verified_owner and protected_request(question):
+            yield REFUSAL
+            return
         key = (user_id, channel_id)
         lock = self._conversation_locks.setdefault(key, asyncio.Lock())
         async with lock:
             stream = self._response_stream_locked(user_id, channel_id, parts_or_message, user_message, user_context)
+            buffered = ''
             try:
                 while True:
                     token = self._request_tools.set(request_tools or {})
                     instructions_token = self._request_instructions.set(request_instructions)
+                    owner_token = self._request_owner.set(bool(verified_owner))
+                    status_token = self._request_status.set(status_callback)
                     try:
                         chunk = await anext(stream)
                     except StopAsyncIteration:
@@ -748,7 +758,11 @@ class LLMHandler:
                     finally:
                         self._request_instructions.reset(instructions_token)
                         self._request_tools.reset(token)
-                    yield chunk
+                        self._request_owner.reset(owner_token)
+                        self._request_status.reset(status_token)
+                    buffered += chunk
+                if buffered:
+                    yield sanitize_output(buffered, owner=verified_owner)
             finally:
                 await stream.aclose()
 
@@ -756,7 +770,9 @@ class LLMHandler:
         return self.tools_schema + [tool['schema'] for tool in (self._request_tools.get() or {}).values()]
 
     def _get_request_system_prompt(self):
+        from utils.conversation_security import security_instructions
         prompt = self.system_prompt
+        prompt += security_instructions(self._request_owner.get())
         from datetime import datetime, timedelta, timezone
         today = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M')
         prompt += (
@@ -839,6 +855,8 @@ class LLMHandler:
                 yield '❌ 模型暫時無法回應，請稍後再試。'
         finally:
             if successful:
+                from utils.conversation_security import sanitize_output
+                collected = sanitize_output(collected, owner=self._request_owner.get())
                 self.add_to_history(user_id, channel_id, 'assistant', collected)
                 if user_msg:
                     conversation_memory.add_conversation_turn(
@@ -924,11 +942,31 @@ class LLMHandler:
             return f'錯誤：找不到函數 {name}'
         if not isinstance(arguments, dict):
             return '錯誤：工具參數必須是 JSON 物件'
+        from utils.conversation_security import sanitize_output
+        serialized = json.dumps(arguments, ensure_ascii=False)
+        if sanitize_output(serialized, owner=True) != serialized:
+            return '🔒 工具參數包含機密，已阻止傳送。'
         try:
+            status = {'search_web':'🔎 搜尋中...', 'scrape_web':'🌐 讀取網頁中...'}.get(name,'⚙️ 執行工具中...')
+            if name == 'control_music':
+                status = {'play':'🎵 點歌中...', 'pause':'⏸️ 暫停音樂中...', 'resume':'▶️ 恢復播放中...',
+                          'skip':'⏭️ 換歌中...', 'stop':'⏹️ 停止播放中...', 'leave':'👋 離開語音頻道中...'
+                          }.get(arguments.get('action'), '🎵 處理音樂中...')
+            await self._notify_status(status)
             return await function(**arguments)
         except Exception as error:
             logger.warning('工具 %s 執行失敗: %s', name, type(error).__name__)
             return '錯誤：工具執行失敗，請檢查參數後重試'
+        finally:
+            await self._notify_status('✍️ 整理回覆中...')
+
+    async def _notify_status(self, text):
+        callback = self._request_status.get()
+        if callback:
+            try:
+                await callback(text)
+            except Exception:
+                logger.debug('狀態訊息更新失敗', exc_info=True)
 
     async def _get_gemini_response(self, user_id: str, channel_id: str, message: str) -> str:
         """獲取 Gemini 非串流回應"""
