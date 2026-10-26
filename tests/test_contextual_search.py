@@ -13,6 +13,7 @@ def test_search_failure_never_tells_model_to_invent_places(monkeypatch):
 
 def test_search_includes_sources_and_currentness_limits(monkeypatch):
     from utils import web_search
+    monkeypatch.setattr(web_search, '_serpapi_search', AsyncMock(return_value=[]))
     monkeypatch.setattr(web_search, '_ddg_search', AsyncMock(return_value=[
         {'title': '餐廳官方網站', 'url': 'https://example.com/menu', 'snippet': '每日午餐菜單'}]))
     result = asyncio.run(web_search.execute_web_search('台北 午餐'))

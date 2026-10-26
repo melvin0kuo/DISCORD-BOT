@@ -5,6 +5,9 @@ from dotenv import load_dotenv
 dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
 load_dotenv(dotenv_path)
 
+# Google results through SerpApi; missing key automatically uses DuckDuckGo.
+SERPAPI_API_KEY = os.getenv('SERPAPI_API_KEY', '').strip()
+
 # --- 開發者設定 ---
 # 開發模式開關，True 會啟用熱重載等功能
 DEV_MODE = os.getenv('DEV_MODE', 'False').lower() == 'true'
