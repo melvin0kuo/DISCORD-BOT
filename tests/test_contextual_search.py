@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 def test_search_failure_never_tells_model_to_invent_places(monkeypatch):
     from utils import web_search
+    monkeypatch.setattr(web_search, '_serpapi_search', AsyncMock(return_value=[]))
     monkeypatch.setattr(web_search, '_ddg_search', AsyncMock(return_value=[]))
     result = asyncio.run(web_search.execute_web_search('台北車站 午餐'))
     assert '自身的知識庫' not in result
