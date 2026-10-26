@@ -4,6 +4,8 @@
 
 ## Python
 .venv/
+.bot-venv/
+.env.setup.tmp
 venv/
 .pytest_cache/
 .pytest_*/
