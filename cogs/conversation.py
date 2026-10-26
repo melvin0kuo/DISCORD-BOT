@@ -17,7 +17,12 @@ class Conversation(commands.Cog):
     def __init__(self, bot):
         # 向量資料庫實例
         from utils.vector_db import VectorDB
-        self.vector_db = VectorDB()
+        self.vector_db = None
+        if config.DEFAULT_LLM_TYPE.lower() not in ('local','lmstudio'):
+            try:
+                self.vector_db = VectorDB()
+            except Exception:
+                logger.warning('既有向量索引不可用，保留原檔並繼續提供聊天服務',exc_info=True)
         self.bot = bot
         self.llm_handler = LLMHandler(bot_name=bot.user.name if bot.user else "助手")
         self.greetings = ["你好", "嗨", "哈囉", "安安", "嘿"]
@@ -279,8 +284,9 @@ class Conversation(commands.Cog):
 
                 try:
                     await sent_msg.edit(content=piece if piece.strip() else '\u200b', allowed_mentions=_AM)
-                except:
-                    pass
+                except Exception as error:
+                    logger.warning('回覆分頁編輯失敗，改送完整頁面: %s', type(error).__name__)
+                    await channel.send(piece if piece.strip() else '\u200b', allowed_mentions=_AM)
 
                 sent_msg = await channel.send("💬 思考中...", allowed_mentions=_AM)
                 last_edit = time.monotonic()

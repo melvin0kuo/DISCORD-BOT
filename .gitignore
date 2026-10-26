@@ -9,6 +9,7 @@ venv/
 .pytest_*/
 .ruff_cache/
 .runtime/
+/vector_db/local-nomic-v1/
 Lavalink/plugins-local/
 __pycache__/
 *.pyc

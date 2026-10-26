@@ -17,7 +17,7 @@ class VectorDB:
         self._load()
 
     def add(self, user_id: str, channel_id: str, text: str, embedding: np.ndarray):
-        assert embedding.shape == (self.dim,)
+        embedding = self._validate_embedding(embedding)
         self.index.add(np.expand_dims(embedding, 0))
         self.meta.append({
             "user_id": user_id,
@@ -27,6 +27,7 @@ class VectorDB:
         self._save()
 
     def search(self, user_id: Optional[str], channel_id: Optional[str], embedding: np.ndarray, top_k=5) -> List[Dict]:
+        embedding = self._validate_embedding(embedding)
         if self.index.ntotal == 0 or top_k <= 0:
             return []
         # 在全體候選中依距離篩選，避免其他用戶的向量擠掉符合權限的結果。
@@ -41,6 +42,12 @@ class VectorDB:
                         break
         return results
 
+    def _validate_embedding(self, embedding):
+        vector = np.asarray(embedding, dtype=np.float32)
+        if vector.shape != (self.dim,) or not np.isfinite(vector).all():
+            raise ValueError(f"Expected {self.dim} finite embedding dimensions")
+        return vector
+
     def _save(self):
         faiss.write_index(self.index, self.index_path)
         with open(self.meta_path, "wb") as f:
@@ -49,6 +56,10 @@ class VectorDB:
     def _load(self):
         if os.path.exists(self.index_path):
             self.index = faiss.read_index(self.index_path)
+            if self.index.d != self.dim:
+                raise ValueError(f"Stored vector dimension {self.index.d} does not match {self.dim}")
         if os.path.exists(self.meta_path):
             with open(self.meta_path, "rb") as f:
                 self.meta = pickle.load(f)
+        if len(self.meta) != self.index.ntotal:
+            raise ValueError("Vector index and metadata counts do not match")

@@ -24,4 +24,10 @@ def handler(memory_db, monkeypatch):
     monkeypatch.setattr(module.config, 'LMSTUDIO_API_KEY', '')
     monkeypatch.setattr(module.config, 'DEFAULT_LLM_TYPE', 'gemini')
     monkeypatch.setattr(module.config, 'ENABLE_FALLBACK', True)
+    async def count_tokens(self, messages, tools):
+        return 100
+    async def remember(self, *args):
+        return None
+    monkeypatch.setattr(module.LLMHandler, '_count_prompt_tokens', count_tokens)
+    monkeypatch.setattr(module.LLMHandler, '_remember_local_turn', remember)
     return module.LLMHandler('Duck')

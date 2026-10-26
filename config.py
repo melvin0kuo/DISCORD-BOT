@@ -7,7 +7,7 @@ load_dotenv(dotenv_path)
 
 # --- 開發者設定 ---
 # 開發模式開關，True 會啟用熱重載等功能
-DEV_MODE = os.getenv('DEV_MODE', 'True').lower() == 'true'
+DEV_MODE = os.getenv('DEV_MODE', 'False').lower() == 'true'
 
 # Discord 設定
 TOKEN = os.getenv('DISCORD_TOKEN')

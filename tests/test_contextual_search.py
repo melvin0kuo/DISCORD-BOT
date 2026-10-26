@@ -106,3 +106,23 @@ def test_translation_and_memory_addresses_do_not_force_store_search(handler, mon
             assert answer == '一般問題的回答'
     asyncio.run(run())
     assert len(calls) == 2
+
+
+def test_source_grounding_still_runs_when_music_tool_is_available(handler,monkeypatch):
+    handler.available_functions['search_web']=AsyncMock(return_value='來源：https://example.com/store')
+    calls=[]
+    async def stream(*args,**kwargs):
+        calls.append(1)
+        if len(calls)==1:
+            yield ('',[{'index':0,'id':'1','function':{'name':'search_web','arguments':'{"query":"台北餐廳"}'}}],'tool_calls')
+        else:
+            yield ('[官方網站](https://invented.example/)；[來源](https://example.com/store)',None,'stop')
+    monkeypatch.setattr(handler,'_stream_lmstudio_sse',stream)
+    async def run():
+        token=handler._request_tools.set({'control_music':{'schema':{'type':'function','function':{'name':'control_music'}},'context':{}}})
+        try:
+            return ''.join([t async for t in handler._get_lmstudio_response_stream('1','10','推薦台北餐廳')])
+        finally: handler._request_tools.reset(token)
+    answer=asyncio.run(run())
+    assert 'invented.example' not in answer
+    assert 'example.com/store' in answer

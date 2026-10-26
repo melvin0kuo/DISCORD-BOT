@@ -97,7 +97,30 @@ class MusicQueue:
         if mode in ["off", "track", "queue"]:
             self.loop_mode = mode
 
-class MusicControlView(discord.ui.View):
+class PlaybackInteractionGuard:
+    """在操作當下驗證語音成員資格及播放工作階段。"""
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        guild = interaction.guild
+        player = self.player
+        if guild is None:
+            message = "❌ 請在伺服器中使用音樂控制。"
+        elif (player is None or guild.voice_client is not player
+              or getattr(player, 'guild', None) is not guild
+              or not getattr(player, 'connected', False)
+              or getattr(player, 'channel', None) is None):
+            message = "❌ 此音樂面板已失效，請重新開啟目前的播放面板。"
+        else:
+            voice = getattr(interaction.user, 'voice', None)
+            channel = getattr(voice, 'channel', None)
+            if channel is not None and channel.id == player.channel.id:
+                return True
+            message = "❌ 請先加入機器人目前所在的語音頻道，才能操作音樂。"
+        await interaction.response.send_message(message, ephemeral=True)
+        return False
+
+
+class MusicControlView(PlaybackInteractionGuard, discord.ui.View):
     """音樂控制面板"""
     def __init__(self, player: wavelink.Player, music_cog):
         super().__init__(timeout=300)  # 5分鐘超時
@@ -196,7 +219,7 @@ class LyricsPageView(discord.ui.View):
         self._update_buttons()
         await interaction.response.edit_message(embed=self._embed(), view=self)
 
-class VolumeView(discord.ui.View):
+class VolumeView(PlaybackInteractionGuard, discord.ui.View):
     """音量控制面板"""
     def __init__(self, player: wavelink.Player):
         super().__init__(timeout=60)
@@ -229,8 +252,9 @@ class VolumeView(discord.ui.View):
 
 class PlaylistView(discord.ui.View):
     """播放列表管理面板"""
-    def __init__(self, music_cog, guild_id: int):
+    def __init__(self, music_cog, guild_id: int, player=None):
         super().__init__(timeout=300)
+        self.player = player
         self.music_cog = music_cog
         self.guild_id = guild_id
         self.current_page = 0
@@ -257,23 +281,26 @@ class PlaylistView(discord.ui.View):
     
     @discord.ui.button(emoji="🗑️", style=discord.ButtonStyle.danger)
     async def clear_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await PlaybackInteractionGuard.interaction_check(self, interaction):
+            return
         queue = self.music_cog.get_queue(self.guild_id)
         queue.clear()
         embed = self.music_cog.create_queue_embed(self.guild_id, 0)
         self.current_page = 0
         await interaction.response.edit_message(embed=embed, view=self)
 
-class SavedPlaylistView(discord.ui.View):
+class SavedPlaylistView(PlaybackInteractionGuard, discord.ui.View):
     """儲存播放列表管理面板"""
-    def __init__(self, music_cog, user_id: int):
+    def __init__(self, music_cog, user_id: int, player=None):
         super().__init__(timeout=300)
+        self.player = player
         self.music_cog = music_cog
         self.user_id = user_id
         self.current_page = 0
     
     @discord.ui.button(label="載入播放列表", emoji="📥", style=discord.ButtonStyle.success)
     async def load_playlist(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(LoadPlaylistModal(self.music_cog))
+        await interaction.response.send_modal(LoadPlaylistModal(self.music_cog, self.player))
     
     @discord.ui.button(label="儲存目前佇列", emoji="💾", style=discord.ButtonStyle.primary)
     async def save_current_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -319,10 +346,11 @@ class SavePlaylistModal(discord.ui.Modal):
         
         await interaction.response.send_message(f"✅ 播放列表 '{playlist_name}' 已儲存 ({len(playlist_data)} 首歌曲)", ephemeral=True)
 
-class LoadPlaylistModal(discord.ui.Modal):
+class LoadPlaylistModal(PlaybackInteractionGuard, discord.ui.Modal):
     """載入播放列表對話框"""
-    def __init__(self, music_cog):
+    def __init__(self, music_cog, player=None):
         super().__init__(title="載入播放列表")
+        self.player = player
         self.music_cog = music_cog
         
         self.name_input = discord.ui.TextInput(
@@ -333,6 +361,8 @@ class LoadPlaylistModal(discord.ui.Modal):
         self.add_item(self.name_input)
     
     async def on_submit(self, interaction: discord.Interaction):
+        if not await self.interaction_check(interaction):
+            return
         playlist_name = self.name_input.value
         user_id = str(interaction.user.id)
         
@@ -349,6 +379,8 @@ class LoadPlaylistModal(discord.ui.Modal):
                 # 嘗試重新搜索歌曲
                 tracks = await wavelink.Playable.search(track_data["uri"])
                 if tracks:
+                    if not await self.interaction_check(interaction):
+                        return
                     queue.add(tracks[0])
                     loaded_count += 1
             except:
@@ -1179,7 +1211,7 @@ class EnhancedMusic(commands.Cog):
                     async def callback(self, interaction: discord.Interaction):
                         index = int(self.values[0])
                         track = self.tracks[index]
-                        player: wavelink.Player = self.ctx.voice_client
+                        player: wavelink.Player = self.view.player
                         if not player:
                             await interaction.response.send_message("❌ 機器人未在語音頻道中。", ephemeral=True)
                             return
@@ -1193,9 +1225,10 @@ class EnhancedMusic(commands.Cog):
                             queue.add_to_history(track)
                             await interaction.response.send_message(f'⏳ 正在載入：{track.title}', ephemeral=True)
 
-                class SearchResultView(discord.ui.View):
+                class SearchResultView(PlaybackInteractionGuard, discord.ui.View):
                     def __init__(self, tracks, music_cog, ctx):
                         super().__init__(timeout=60)
+                        self.player = ctx.voice_client
                         self.add_item(SearchResultSelect(tracks, music_cog, ctx))
 
                 embed = discord.Embed(
@@ -1278,7 +1311,7 @@ class EnhancedMusic(commands.Cog):
     async def queue(self, ctx, page: int = 1):
         """顯示播放佇列"""
         embed = self.create_queue_embed(ctx.guild.id, page - 1)
-        view = PlaylistView(self, ctx.guild.id)
+        view = PlaylistView(self, ctx.guild.id, ctx.voice_client)
         await ctx.send(embed=embed, view=view)
 
     @commands.hybrid_command()
@@ -1718,7 +1751,7 @@ class EnhancedMusic(commands.Cog):
                 inline=False
             )
             
-            view = SavedPlaylistView(self, ctx.author.id)
+            view = SavedPlaylistView(self, ctx.author.id, ctx.voice_client)
             await ctx.send(embed=embed, view=view)
             
         elif action.lower() == "save":
@@ -1834,7 +1867,7 @@ class EnhancedMusic(commands.Cog):
             async def callback(self, interaction: discord.Interaction):
                 index = int(self.values[0])
                 track = self.tracks[index]
-                player: wavelink.Player = self.ctx.voice_client
+                player: wavelink.Player = self.view.player
                 if not player:
                     await interaction.response.send_message("❌ 機器人未在語音頻道中。", ephemeral=True)
                     return
@@ -1848,9 +1881,10 @@ class EnhancedMusic(commands.Cog):
                     queue.add_to_history(track)
                     await interaction.response.send_message(f'⏳ 正在載入：{track.title}', ephemeral=True)
 
-        class SearchResultView(discord.ui.View):
+        class SearchResultView(PlaybackInteractionGuard, discord.ui.View):
             def __init__(self, tracks, music_cog, ctx):
                 super().__init__(timeout=60)
+                self.player = ctx.voice_client
                 self.add_item(SearchResultSelect(tracks, music_cog, ctx))
 
         try:
