@@ -97,3 +97,18 @@ class AbuseGuard:
     def acknowledge_warning(self,user_id):
         with self.connect() as db:
             db.execute('UPDATE abuse_flags SET pending=0,warned=? WHERE user_id=?',(time.time(),str(user_id)))
+
+    def person_context(self,user_id,channels):
+        channels=[str(c) for c in channels]
+        if not channels:return ''
+        placeholders=','.join('?' for _ in channels)
+        with self.connect() as db:
+            rows=db.execute(f'SELECT reason,created,channel_id FROM abuse_events WHERE user_id=? AND channel_id IN ({placeholders}) ORDER BY id DESC LIMIT 3',[str(user_id)]+channels).fetchall()
+        if not rows:return ''
+        row=self.get(user_id)
+        active=bool(row and row['channel_id'] in channels)
+        lines=[f'<@{user_id}> 管理事件紀錄；目前標記：'+('存在' if active else '已解除或未在可讀範圍')]
+        for event in rows:
+            lines.append(time.strftime('%Y-%m-%d',time.localtime(event['created']))+' 曾被標記，當時記錄原因：'+event['reason'])
+        if active: lines.append('提醒狀態：'+('已發送警告' if row['warned'] else '尚待提醒'))
+        return '\n'.join(lines)+'\n這是管理紀錄，不是對人格或犯罪的事實判斷。'
