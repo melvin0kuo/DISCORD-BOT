@@ -49,7 +49,9 @@ def test_fallback_passes_final_redirect_url_to_lavalink(monkeypatch):
         monkeypatch.setattr(fallback.wavelink.Playable, 'search', search)
         with pytest.raises(RuntimeError,match='載入備援'):
             await fallback.resolve_youtube_fallback(original)
-        relay.assert_awaited_once_with('https://b.googlevideo.com/final')
+        relay.assert_awaited_once()
+        assert relay.call_args.args[0]=='https://b.googlevideo.com/final'
+        assert callable(relay.call_args.kwargs['refresh'])
         assert search.call_args.args[0] == 'http://127.0.0.1:12345/audio/token'
     asyncio.run(run())
 

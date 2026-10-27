@@ -63,7 +63,7 @@ async def resolve_youtube_fallback(original):
             # the validated final URL that actually returned audio bytes.
             url = validate_audio_url(str(response.url))
     from utils.audio_relay import audio_relay
-    relay_url = await audio_relay.add(url)
+    relay_url = await audio_relay.add(url,refresh=lambda:extract_audio_url(original.identifier))
     tracks = await wavelink.Playable.search(relay_url, source=None)
     if not tracks or isinstance(tracks, wavelink.Playlist):
         raise RuntimeError('Lavalink 無法載入備援音訊')

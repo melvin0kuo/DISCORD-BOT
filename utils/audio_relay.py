@@ -2,10 +2,12 @@
 import asyncio
 import secrets
 import time
+import logging
 from urllib.parse import urljoin
 
 import aiohttp
 from aiohttp import web
+logger=logging.getLogger(__name__)
 
 
 def validate_audio_url(url):
@@ -20,7 +22,7 @@ class AudioRelay:
         self.urls = {}
         self.lock = asyncio.Lock()
 
-    async def add(self, url):
+    async def add(self, url, *, refresh=None):
         validate_audio_url(url)
         async with self.lock:
             if self.runner is None:
@@ -37,7 +39,7 @@ class AudioRelay:
             if len(self.urls) >= 128:
                 self.urls.pop(next(iter(self.urls)))
             token = secrets.token_urlsafe(24)
-            self.urls[token] = (url, now + 6 * 3600)
+            self.urls[token] = (url, now + 6 * 3600, refresh)
             return f'http://127.0.0.1:{self.port}/audio/{token}'
 
     async def serve(self, request):
@@ -48,15 +50,41 @@ class AudioRelay:
         if request.headers.get('Range'):
             headers['Range'] = request.headers['Range']
         url = entry[0]
+        failures=0
+        refreshed=False
         for _ in range(10):
             validate_audio_url(url)
-            async with self.session.get(url, headers=headers, allow_redirects=False) as upstream:
+            try:
+                upstream=await self.session.get(url, headers=headers, allow_redirects=False)
+            except (aiohttp.ClientError,asyncio.TimeoutError):
+                if failures>=2:raise web.HTTPBadGateway(reason='Audio upstream connection failed') from None
+                failures+=1
+                logger.warning('音訊 CDN 連線暫時失敗，有限重試 %s/2',failures)
+                await asyncio.sleep(.2*failures)
+                continue
+            async with upstream:
                 if upstream.status in (301, 302, 303, 307, 308):
                     url = urljoin(url, upstream.headers.get('Location', ''))
                     continue
+                if upstream.status in (403,410) and entry[2] and not refreshed:
+                    refreshed=True
+                    logger.warning('音訊 CDN 拒絕網址 HTTP %s，更新同一影片的音訊網址一次',upstream.status)
+                    try:url=validate_audio_url(await entry[2]())
+                    except Exception as error:
+                        logger.warning('同影片音訊網址更新失敗：%s',type(error).__name__)
+                        raise web.HTTPBadGateway(reason='Audio URL refresh failed') from None
+                    self.urls[request.match_info['token']]=(url,entry[1],entry[2])
+                    continue
+                if upstream.status in (429,500,502,503,504) and failures<2:
+                    failures+=1
+                    logger.warning('音訊 CDN HTTP %s，有限重試 %s/2',upstream.status,failures)
+                    await asyncio.sleep(.2*failures)
+                    continue
                 if upstream.status not in (200, 206, 416):
+                    logger.warning('音訊 CDN 無法讀取：HTTP %s，重試次數 %s',upstream.status,failures)
                     raise web.HTTPBadGateway()
                 if upstream.status != 416 and not upstream.headers.get('Content-Type', '').startswith('audio/'):
+                    logger.warning('音訊 CDN 回傳非音訊內容：HTTP %s 類型 %s',upstream.status,upstream.headers.get('Content-Type','unknown'))
                     raise web.HTTPBadGateway()
                 forwarded = {key: value for key, value in upstream.headers.items()
                              if key.lower() in ('content-type', 'content-length', 'content-range', 'accept-ranges')}
