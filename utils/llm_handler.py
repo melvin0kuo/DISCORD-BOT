@@ -747,6 +747,17 @@ class LLMHandler:
         if user_id in active:
             yield '⏳ 上一個請求仍在處理，請等完成後再送出。'
             return
+        from utils.generation_budget import GenerationBudget
+        import time
+        if not hasattr(self,'_generation_budget'):
+            self._generation_budget=GenerationBudget()
+        budget=self._generation_budget
+        allowance=budget.allowance(user_id)
+        if allowance.blocked:
+            budget.reject(user_id,channel_id)
+            logger.warning('已限制累計生成用量 user=%s channel=%s',user_id,channel_id)
+            yield '⏳ 已達個人累計生成額度，請稍後再試；額度會隨時間恢復。這是資源限制，不是違規處分。'
+            return
         lock = self._conversation_locks.setdefault(key, asyncio.Lock())
         async with lock:
             active.add(user_id)
@@ -754,6 +765,7 @@ class LLMHandler:
             buffered = ''
             started=asyncio.get_running_loop().time()
             checked_length=0
+            outcome='cancelled'
             try:
                 while True:
                     token = self._request_tools.set(request_tools or {})
@@ -761,7 +773,7 @@ class LLMHandler:
                     owner_token = self._request_owner.set(bool(verified_owner))
                     status_token = self._request_status.set(status_callback)
                     try:
-                        remaining=120-(asyncio.get_running_loop().time()-started)
+                        remaining=allowance.seconds-(asyncio.get_running_loop().time()-started)
                         if remaining<=0:raise asyncio.TimeoutError
                         chunk = await asyncio.wait_for(anext(stream),timeout=remaining)
                     except StopAsyncIteration:
@@ -772,9 +784,16 @@ class LLMHandler:
                         self._request_owner.reset(owner_token)
                         self._request_status.reset(status_token)
                     buffered += chunk
+                    if len(buffered)>allowance.characters:
+                        outcome='output_quota'
+                        self.clear_history(user_id,channel_id)
+                        await stream.aclose()
+                        yield '⏳ 本次已達剩餘輸出額度，已停止生成；請稍後再試或縮小問題範圍。'
+                        return
                     if len(buffered)-checked_length>=64:
                         checked_length=len(buffered)
                         if repetitive_output(buffered) or len(buffered)>24000:
+                            outcome='repetition'
                             logger.warning('已停止大量重複輸出 user=%s channel=%s',user_id,channel_id)
                             self.clear_history(user_id,channel_id)
                             await stream.aclose()
@@ -782,16 +801,22 @@ class LLMHandler:
                             return
                 if buffered:
                     if repetitive_output(buffered) or len(buffered)>24000:
+                        outcome='repetition'
                         self.clear_history(user_id,channel_id)
                         yield '⚠️ 已停止大量重複輸出，請改成一般問題或指定合理次數。'
                         return
                     yield sanitize_output(buffered, owner=verified_owner)
+                outcome='complete'
             except asyncio.TimeoutError:
+                outcome='timeout'
                 self.clear_history(user_id,channel_id)
                 yield '⏳ 本次生成已達時間上限，請縮小問題範圍後重試。'
             finally:
                 active.discard(user_id)
-                await stream.aclose()
+                try:
+                    await stream.aclose()
+                finally:
+                    budget.record(user_id,channel_id,time.time(),asyncio.get_running_loop().time()-started,len(buffered),outcome)
 
     def _get_tools_schema(self):
         return self.tools_schema + [tool['schema'] for tool in (self._request_tools.get() or {}).values()]
