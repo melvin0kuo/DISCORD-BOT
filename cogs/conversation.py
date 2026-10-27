@@ -515,6 +515,7 @@ class Conversation(commands.Cog):
         await ctx.send(f"已為您設定個人記憶：{memory}")
 
     @commands.command(name="llm_info", help="顯示目前使用的 LLM 模型資訊")
+    @commands.is_owner()
     async def llm_info(self, ctx):
         try:
             model_info = self.llm_handler.get_current_model_info()
@@ -534,6 +535,7 @@ class Conversation(commands.Cog):
             await ctx.send(f"抱歉，獲取模型信息時出現錯誤: {str(e)}")
 
     @commands.command(name="switch_model", help="切換 LLM 模型類型 (gemini / local)")
+    @commands.is_owner()
     async def switch_model(self, ctx, model_type: str = None):
         if model_type is None:
             info = self.llm_handler.get_current_model_info()

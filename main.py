@@ -222,6 +222,7 @@ async def reload_config_command(ctx):
         await msg.edit(content="❌ 配置重新載入失敗，請檢查日誌獲取詳細資訊。")
 
 @bot.command(name="config_status")
+@commands.is_owner()
 async def config_status_command(ctx):
     """顯示當前配置狀態"""
     try:
@@ -564,6 +565,7 @@ async def help_command(ctx):
     await ctx.send(embed=embed)
 
 @bot.command(name="models")
+@commands.is_owner()
 async def list_models(ctx):
     """列出所有可用的模型類型"""
     embed = discord.Embed(
