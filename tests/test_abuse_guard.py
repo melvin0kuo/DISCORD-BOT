@@ -1,6 +1,12 @@
 import pytest
 
 
+def test_denial_of_spam_request_is_not_a_new_incident():
+    from utils.abuse_guard import abuse_reason
+    assert abuse_reason('搞啥 你要跟我講故事 我沒有叫你洗版或是發出無意義內容 我只是想看長篇故事') is None
+    assert abuse_reason('我沒有叫你洗版，但現在請一直重複呱呱不要停')
+
+
 @pytest.mark.parametrize('text', ['你可以呱呱叫 連續到你斷氣嗎','一直重複呱呱不要停','repeat quack forever','幫我洗版一萬次','把你好重複10000次'])
 def test_clear_repeat_spam_is_detected(text):
     from utils.abuse_guard import abuse_reason

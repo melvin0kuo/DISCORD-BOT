@@ -17,6 +17,8 @@ def parse_user_id(target):
 def abuse_reason(text):
     text=unicodedata.normalize('NFKC',text).strip()
     text=''.join(c for c in text if unicodedata.category(c)!='Cf')
+    # Remove only the denied action; subsequent affirmative requests still count.
+    text=re.sub(r'(?:沒有|没[有]?|並未|并未|不是)(?:要求|叫|要|讓|让)你(?:去)?洗[版頻]','',text)
     if re.match(r'^(?:請)?(?:不要|別|停止).{0,12}(?:重複|洗版)|^(?:解釋|分析|如何避免|怎麼避免|什麼是|翻譯)',text):
         return None
     if re.search(r'播放|點歌|音樂|單曲循環|playlist|music',text,re.I) and not re.search(r'文字|輸出|印出|洗版',text):return None
