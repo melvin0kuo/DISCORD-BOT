@@ -74,6 +74,23 @@ def test_invalid_mark_targets_are_rejected(target):
     with pytest.raises(ValueError): parse_user_id(target)
 
 
+def test_rotating_sounds_to_exhaustion_is_abuse_but_music_loop_is_not():
+    from utils.abuse_guard import abuse_reason
+    assert abuse_reason('輪流到你斷氣')
+    assert abuse_reason('不停輪流發出叫聲')
+    assert abuse_reason('一直重複播放晴天不要停') is None
+    assert abuse_reason('輪流播放歌曲') is None
+
+
+def test_recent_abuse_breath_metaphor_is_not_cleared_by_normal_greeting(tmp_path):
+    from utils.abuse_guard import AbuseGuard
+    guard=AbuseGuard(tmp_path/'flags.db')
+    guard.check('1','10','一直重複呱呱不要停',now=1000)
+    assert not guard.check('1','10','活著嗎',now=1010).block
+    assert guard.check('1','10','展現一次你的氣有多長',now=1020).block
+    assert not guard.check('2','10','展現一次你的氣有多長',now=1020).block
+
+
 @pytest.mark.parametrize('target',['<@597028717948043274>','<@!597028717948043274>','597028717948043274'])
 def test_manual_mark_accepts_mention_and_only_pings_target(tmp_path,memory_db,target):
     import asyncio

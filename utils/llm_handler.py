@@ -736,6 +736,7 @@ class LLMHandler:
     async def get_llm_response_stream(self, user_id: str, channel_id: str, parts_or_message, *, user_message=None, user_context="", request_tools=None, request_instructions="", verified_owner=False, status_callback=None) -> AsyncGenerator[str, None]:
         """統一的串流回應進入點"""
         from utils.conversation_security import protected_request, sanitize_output, REFUSAL
+        from utils.abuse_guard import repetitive_output
         question = user_message if user_message is not None else (parts_or_message if isinstance(parts_or_message, str) else '\n'.join(p.get('text','') for p in parts_or_message if isinstance(p,dict)))
         if not verified_owner and protected_request(question):
             yield REFUSAL
@@ -745,6 +746,7 @@ class LLMHandler:
         async with lock:
             stream = self._response_stream_locked(user_id, channel_id, parts_or_message, user_message, user_context)
             buffered = ''
+            checked_length=0
             try:
                 while True:
                     token = self._request_tools.set(request_tools or {})
@@ -761,7 +763,19 @@ class LLMHandler:
                         self._request_owner.reset(owner_token)
                         self._request_status.reset(status_token)
                     buffered += chunk
+                    if len(buffered)-checked_length>=64:
+                        checked_length=len(buffered)
+                        if repetitive_output(buffered):
+                            logger.warning('已停止大量重複輸出 user=%s channel=%s',user_id,channel_id)
+                            self.clear_history(user_id,channel_id)
+                            await stream.aclose()
+                            yield '⚠️ 已停止大量重複輸出，請改成一般問題或指定合理次數。'
+                            return
                 if buffered:
+                    if repetitive_output(buffered):
+                        self.clear_history(user_id,channel_id)
+                        yield '⚠️ 已停止大量重複輸出，請改成一般問題或指定合理次數。'
+                        return
                     yield sanitize_output(buffered, owner=verified_owner)
             finally:
                 await stream.aclose()
@@ -846,6 +860,10 @@ class LLMHandler:
                             yield chunk
                     if not collected:
                         raise RuntimeError('模型未回傳內容')
+                    from utils.abuse_guard import repetitive_output
+                    if repetitive_output(collected):
+                        self.clear_history(user_id,channel_id)
+                        raise RuntimeError('已攔截大量重複輸出，不寫入對話記憶')
                     successful = True
                     break
                 except Exception:

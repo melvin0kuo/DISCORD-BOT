@@ -18,9 +18,10 @@ def abuse_reason(text):
     text=''.join(c for c in text if unicodedata.category(c)!='Cf')
     if re.match(r'^(?:請)?(?:不要|別|停止).{0,12}(?:重複|洗版)|^(?:解釋|分析|如何避免|怎麼避免|什麼是|翻譯)',text):
         return None
+    if re.search(r'播放|點歌|音樂|單曲循環|playlist|music',text,re.I) and not re.search(r'文字|輸出|印出|洗版',text):return None
     if re.search(r'洗[版頻]|spam\s+(?:the\s+)?(?:chat|channel)',text,re.I):
         return '要求洗版'
-    repeated=re.search(r'重[複覆]|連續.{0,8}(?:叫|呱)|呱呱叫|repeat|keep\s+(?:saying|printing)',text,re.I)
+    repeated=re.search(r'重[複覆]|輪流|轮流|連續.{0,8}(?:叫|呱)|呱呱叫|repeat|keep\s+(?:saying|printing)',text,re.I)
     endless=re.search(r'一直|無限|永遠|不要停|不停|斷氣|直到.{0,8}(?:上限|斷|不能)|forever|endless|never\s+stop',text,re.I)
     if repeated and endless: return '要求無限或持續重複輸出'
     if repeated:
@@ -28,6 +29,14 @@ def abuse_reason(text):
         if count and int(count[1].replace(',',''))>=1000: return '要求大量重複輸出'
         if re.search(r'(?:一千|千|一萬|十萬|百萬)\s*(?:次|遍)',text): return '要求大量重複輸出'
     return None
+
+
+def repetitive_output(text):
+    # Long technical code / literal data are not evidence of conversational spam.
+    outside=''.join(re.split(r'```|~~~',text)[::2])
+    outside=re.sub(r'`[^`\n]*`','',outside)
+    if len(outside)<256:return False
+    return bool(re.search(r'([^\W\d_][\w\s，。！!～~、,.?？-]{0,15})\1{31,}',outside))
 
 
 @dataclass
@@ -71,6 +80,9 @@ class AbuseGuard:
         now=time.time() if now is None else now
         row=self.get(user_id)
         reason=abuse_reason(text)
+        if (not reason and row and row['channel_id']==str(channel_id) and 0<=now-row['updated']<600
+                and re.search(r'(?:展[現示]|表[現演]).{0,10}(?:你(?:的)?(?:氣|肺活量|耐力)|氣有多長)',text)):
+            reason='近期重複請求改以展示氣長或耐力延續'
         followup=bool(row and row['channel_id']==str(channel_id) and row['active_until']>now
                       and re.fullmatch(r'(?:再多[點些一點]*|太短了?[吧啦]?|繼續|繼續呱|不要停|more|continue)[！!。.?？\s]*',text.strip(),re.I))
         if reason or followup:
