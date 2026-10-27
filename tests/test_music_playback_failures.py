@@ -17,7 +17,7 @@ def test_failed_track_stops_autoplay_and_reports_once(memory_db):
         cog.auto_recommend_and_play = AsyncMock()
         for reason in ('loadFailed', 'loadfailed'):
             await cog.on_wavelink_track_end(SimpleNamespace(player=player, track=track, reason=reason))
-        assert cog.auto_recommend_and_play.await_count == 0
+        assert cog.auto_recommend_and_play.await_count == 1  # One bounded recommendation; none available.
         assert player.last_channel.send.await_count == 1
         assert player.autoplay == wavelink.AutoPlayMode.disabled
         assert 1 in cog._playback_blocked

@@ -404,6 +404,9 @@ class EnhancedMusic(commands.Cog):
         self._voice_locks = {}
         self._playback_generation = {}
         self._fallback_attempts = {}
+        self._failure_handled = {}
+        self._failed_tracks = {}
+        self._consecutive_failures = {}
         self._playback_active = {}
         self._idle_tasks = {}
         self._idle_disconnecting = set()
@@ -784,6 +787,8 @@ class EnhancedMusic(commands.Cog):
             extras = dict(getattr(track, 'extras', {}))
             title = extras.get('_original_title') or getattr(track, 'title', '這首歌曲')
             notice = f'❌ 無法讀取「{title}」的音訊，已停止自動接播。音源可能要求登入或暫時不可用；請改用其他音源或重新點歌。'
+            if self._consecutive_failures.get(guild_id,0)>=3:
+                notice='❌ 已連續 3 首無法播放，暫停接播以避免無限跳歌；剩餘佇列保留，請稍後重新點歌或換用音源。'
             if getattr(track, 'source', None) == 'youtube' or extras.get('_youtube_fallback'):
                 try:
                     candidates = await asyncio.wait_for(wavelink.Playable.search(
@@ -849,7 +854,51 @@ class EnhancedMusic(commands.Cog):
                 logger.warning('YouTube 音訊備援失敗: %s', type(error).__name__)
                 if self._playback_generation.get(guild_id, 0) != generation:
                     return
-        await self._halt_failed_playback(player, track)
+        await self._advance_after_failure(player, track)
+
+    def _failure_identity(self,track):
+        extras=dict(getattr(track,'extras',{}))
+        if extras.get('_youtube_fallback'):
+            video=self._extract_youtube_id(getattr(track,'uri',None))
+            if video:return ('youtube',video)
+        return self._track_identity(track)
+
+    async def _advance_after_failure(self,player,track):
+        guild_id=player.guild.id
+        generation=self._playback_generation.get(guild_id,0)
+        key=(generation,self._track_identity(track))
+        async with self._track_end_locks.setdefault(guild_id,asyncio.Lock()):
+            if not self._is_current_track_event(guild_id,track) or self._failure_handled.get(guild_id)==key:return
+            self._failure_handled[guild_id]=key
+            failed=self._failed_tracks.setdefault(guild_id,set())
+            failed.add(self._failure_identity(track))
+            self._consecutive_failures[guild_id]=self._consecutive_failures.get(guild_id,0)+1
+            queue=self.get_queue(guild_id)
+            queue.queue[:]=[item for item in queue.queue if self._failure_identity(item) not in failed]
+            # A bounded failure chain prevents a broken source from flooding recommendations.
+            if self._consecutive_failures[guild_id]>=3:
+                await self._halt_failed_playback(player,track);return
+            next_track=queue.get_next(ignore_track_loop=True)
+            if not next_track and self.get_autoplay_status(guild_id):
+                self._fallback_attempts.pop(guild_id,None)
+                await self.auto_recommend_and_play(player)
+                if not self._is_current_track_event(guild_id,track):return
+                queue.queue[:]=[item for item in queue.queue if self._failure_identity(item) not in failed]
+                next_track=queue.get_next(ignore_track_loop=True)
+            if not next_track:
+                await self._halt_failed_playback(player,track);return
+            if not self._is_current_track_event(guild_id,track):return
+            # _play_track changes the generation before awaiting the node, so late events are stale.
+            try:
+                await self._play_track(player,next_track,expected_generation=generation)
+            except Exception:
+                logger.exception('失敗後接播下一首亦無法送出')
+                await self._halt_failed_playback(player,next_track);return
+            channel=getattr(player,'last_channel',None)
+            if channel and self._is_current_track_event(guild_id,next_track):
+                title=dict(getattr(track,'extras',{})).get('_original_title') or getattr(track,'title','此歌曲')
+                try:await channel.send(f'⏭️ 無法讀取「{title}」，已跳過並接播下一首。',allowed_mentions=discord.AllowedMentions.none())
+                except Exception:logger.warning('無法發送跳過通知',exc_info=True)
 
     @commands.Cog.listener()
     async def on_wavelink_track_exception(self, payload):
@@ -866,7 +915,7 @@ class EnhancedMusic(commands.Cog):
         if not self._is_current_track_event(guild_id, payload.track):
             return
         generation = self._playback_generation.get(guild_id, 0)
-        await self._halt_failed_playback(payload.player, payload.track)
+        await self._advance_after_failure(payload.player, payload.track)
         if (self._playback_generation.get(guild_id, 0) == generation
                 and self._is_current_track_event(guild_id, payload.track)):
             await payload.player.stop()
@@ -883,13 +932,17 @@ class EnhancedMusic(commands.Cog):
             await player.last_channel.send(embed=self.create_now_playing_embed(player, player.guild.id),
                                            view=MusicControlView(player, self))
 
-    async def _play_track(self, player, track, *, manual=False):
+    async def _play_track(self, player, track, *, manual=False, expected_generation=None):
         self._cancel_idle_disconnect(player.guild.id)
         async with self._voice_locks.setdefault(player.guild.id, asyncio.Lock()):
+            if expected_generation is not None and self._playback_generation.get(player.guild.id,0)!=expected_generation:
+                return False
             if getattr(player.guild, 'voice_client', player) is not player:
                 raise RuntimeError('播放器已離開語音頻道，請重新點歌')
             if manual:
                 self._playback_blocked.discard(player.guild.id)
+                self._failed_tracks.pop(player.guild.id,None)
+                self._consecutive_failures.pop(player.guild.id,None)
             elif player.guild.id in self._playback_blocked:
                 return False
             self._cancel_pending_playback(player.guild.id)
@@ -909,6 +962,7 @@ class EnhancedMusic(commands.Cog):
             return
         reason = str(payload.reason).lower()
         failure_key = (self._playback_generation.get(guild_id, 0), self._track_identity(payload.track))
+        if self._failure_handled.get(guild_id)==failure_key:return
         if self._fallback_attempts.get(guild_id) == failure_key:
             return  # A failure may also produce finished/stopped while recovery is pending.
         if reason in ('loadfailed', 'load_failed'):
@@ -923,6 +977,7 @@ class EnhancedMusic(commands.Cog):
                     or player.current is not None or guild_id in self._playback_blocked):
                 return
             queue = self.get_queue(guild_id)
+            if reason=='finished':self._consecutive_failures.pop(guild_id,None)
             next_track = queue.get_next() if reason == 'finished' or queue.queue else None
             if not next_track and reason == 'finished' and self.get_autoplay_status(guild_id):
                 await self.auto_recommend_and_play(player)
@@ -974,7 +1029,8 @@ class EnhancedMusic(commands.Cog):
 
             def pick_from(candidates):
                 """從候選清單中隨機挑一首未播過的"""
-                eligible = [t for t in candidates if t.title.lower() not in played_titles]
+                eligible = [t for t in candidates if t.title.lower() not in played_titles
+                            and self._failure_identity(t) not in self._failed_tracks.get(guild_id,set())]
                 return random.choice(eligible) if eligible else None
 
             # ── 策略 1：YouTube Radio（RDAMVM）——風格最相近 ──────────────
@@ -1048,6 +1104,7 @@ class EnhancedMusic(commands.Cog):
                     or (active is not None and self._fallback_attempts.get(guild_id) == active)):
                 return False
             if recommended_track:
+                if self._failure_identity(recommended_track) in self._failed_tracks.get(guild_id,set()):return False
                 queue.add(recommended_track)
                 logger.info(f"📋 已將推薦歌曲加入佇列: {recommended_track.title}")
                 
