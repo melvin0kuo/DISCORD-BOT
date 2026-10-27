@@ -5,6 +5,7 @@ import re
 import sqlite3
 import time
 import unicodedata
+from collections import Counter
 
 
 def parse_user_id(target):
@@ -32,6 +33,10 @@ def abuse_reason(text):
 
 
 def repetitive_output(text):
+    lines=[re.sub(r'\s+',' ',line.strip()) for line in text.splitlines() if len(line.strip())>=8]
+    if len(lines)>=32:
+        counts=Counter(lines)
+        if sum(n for n in counts.values() if n>=8)>=len(lines)*0.65:return True
     # Long technical code / literal data are not evidence of conversational spam.
     outside=''.join(re.split(r'```|~~~',text)[::2])
     outside=re.sub(r'`[^`\n]*`','',outside)
@@ -47,6 +52,7 @@ class Outcome:
 
 class AbuseGuard:
     def __init__(self,path='data/abuse_flags.db'):
+        self._recent={}
         self.path=Path(path); self.path.parent.mkdir(parents=True,exist_ok=True)
         with self.connect() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS abuse_flags (
@@ -78,8 +84,26 @@ class AbuseGuard:
 
     def check(self,user_id,channel_id,text,*,now=None,message_id=''):
         now=time.time() if now is None else now
+        key=(str(user_id),str(channel_id))
+        self._recent={k:v for k,v in self._recent.items() if 0<=now-v[0]<600}
+        previous=self._recent.get(key,(now,[]))[1]
+        context=' '.join(previous[-3:])
+        self._recent[key]=(now,(previous+[text[:1000]])[-4:])
+        if len(self._recent)>1024:self._recent.pop(next(iter(self._recent)))
         row=self.get(user_id)
+        with self.connect() as db:
+            recent=db.execute('SELECT COUNT(*) FROM abuse_events WHERE user_id=? AND created>? AND created<=?',(str(user_id),now-120,now)).fetchone()[0]
+        if recent>=3:
+            return Outcome(True,f'⏳ <@{user_id}> 短時間多次要求大量重複，暫停生成 2 分鐘，請稍後再試。')
         reason=abuse_reason(text)
+        count=re.search(r'(\d[\d,]*)\s*(?:次|遍|times)',text,re.I)
+        if (not reason and count and int(count[1].replace(',',''))>=1000
+                and re.search(r'手動|print|輸出|重複|輪流|叫',context,re.I)
+                and re.search(r'寫|完整|複製|展開|輸出',text)):
+            reason='跨輪要求大量展開重複內容或程式碼'
+        if (not reason and re.search(r'輪流|重複|叫',context)
+                and re.search(r'累為止|不應該會累|直到.{0,5}累',text)):
+            reason='跨輪要求持續重複直到耗盡'
         if (not reason and row and row['channel_id']==str(channel_id) and 0<=now-row['updated']<600
                 and re.search(r'(?:展[現示]|表[現演]).{0,10}(?:你(?:的)?(?:氣|肺活量|耐力)|氣有多長)',text)):
             reason='近期重複請求改以展示氣長或耐力延續'

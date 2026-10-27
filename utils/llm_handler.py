@@ -742,10 +742,17 @@ class LLMHandler:
             yield REFUSAL
             return
         key = (user_id, channel_id)
+        active=getattr(self,'_active_users',None)
+        if active is None:self._active_users=active=set()
+        if user_id in active:
+            yield '⏳ 上一個請求仍在處理，請等完成後再送出。'
+            return
         lock = self._conversation_locks.setdefault(key, asyncio.Lock())
         async with lock:
+            active.add(user_id)
             stream = self._response_stream_locked(user_id, channel_id, parts_or_message, user_message, user_context)
             buffered = ''
+            started=asyncio.get_running_loop().time()
             checked_length=0
             try:
                 while True:
@@ -754,7 +761,9 @@ class LLMHandler:
                     owner_token = self._request_owner.set(bool(verified_owner))
                     status_token = self._request_status.set(status_callback)
                     try:
-                        chunk = await anext(stream)
+                        remaining=120-(asyncio.get_running_loop().time()-started)
+                        if remaining<=0:raise asyncio.TimeoutError
+                        chunk = await asyncio.wait_for(anext(stream),timeout=remaining)
                     except StopAsyncIteration:
                         break
                     finally:
@@ -765,19 +774,23 @@ class LLMHandler:
                     buffered += chunk
                     if len(buffered)-checked_length>=64:
                         checked_length=len(buffered)
-                        if repetitive_output(buffered):
+                        if repetitive_output(buffered) or len(buffered)>24000:
                             logger.warning('已停止大量重複輸出 user=%s channel=%s',user_id,channel_id)
                             self.clear_history(user_id,channel_id)
                             await stream.aclose()
                             yield '⚠️ 已停止大量重複輸出，請改成一般問題或指定合理次數。'
                             return
                 if buffered:
-                    if repetitive_output(buffered):
+                    if repetitive_output(buffered) or len(buffered)>24000:
                         self.clear_history(user_id,channel_id)
                         yield '⚠️ 已停止大量重複輸出，請改成一般問題或指定合理次數。'
                         return
                     yield sanitize_output(buffered, owner=verified_owner)
+            except asyncio.TimeoutError:
+                self.clear_history(user_id,channel_id)
+                yield '⏳ 本次生成已達時間上限，請縮小問題範圍後重試。'
             finally:
+                active.discard(user_id)
                 await stream.aclose()
 
     def _get_tools_schema(self):
@@ -861,7 +874,7 @@ class LLMHandler:
                     if not collected:
                         raise RuntimeError('模型未回傳內容')
                     from utils.abuse_guard import repetitive_output
-                    if repetitive_output(collected):
+                    if repetitive_output(collected) or len(collected)>24000:
                         self.clear_history(user_id,channel_id)
                         raise RuntimeError('已攔截大量重複輸出，不寫入對話記憶')
                     successful = True
