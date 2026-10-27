@@ -752,6 +752,13 @@ class LLMHandler:
         if not hasattr(self,'_generation_budget'):
             self._generation_budget=GenerationBudget()
         budget=self._generation_budget
+        from utils.response_limits import oversized_request, response_limits
+        character_limit,line_limit=response_limits(question)
+        if oversized_request(question):
+            budget.reject(user_id,channel_id,reason='oversized_request')
+            yield '📏 本次要求的輸出過長，請分批指定較小範圍，例如先提供 20 個鏡頭或一個章節。'
+            return
+        request_instructions += f'\n本次回答最多 {character_limit} 字、{line_limit} 個非空白行；先給重點或可用短版，較長內容請使用者分批指定範圍，不要自動延伸全文。'
         allowance=budget.allowance(user_id)
         if allowance.blocked:
             budget.reject(user_id,channel_id)
@@ -789,6 +796,13 @@ class LLMHandler:
                         self.clear_history(user_id,channel_id)
                         await stream.aclose()
                         yield '⏳ 本次已達剩餘輸出額度，已停止生成；請稍後再試或縮小問題範圍。'
+                        return
+                    if len(buffered)>character_limit or sum(bool(line.strip()) for line in buffered.splitlines())>line_limit:
+                        outcome='response_length'
+                        logger.warning('已限制單次生成長度 user=%s channel=%s',user_id,channel_id)
+                        self.clear_history(user_id,channel_id)
+                        await stream.aclose()
+                        yield '📏 回覆已達單次長度上限，已停止生成。請分批指定較小範圍，例如一個章節或 20 個鏡頭。'
                         return
                     if len(buffered)-checked_length>=64:
                         checked_length=len(buffered)

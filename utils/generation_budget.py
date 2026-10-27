@@ -50,8 +50,8 @@ class GenerationBudget:
                 db.execute('DELETE FROM generation_events WHERE created<?',(finished-30*86400,))
                 self._pruned=finished
 
-    def reject(self,user_id,channel_id,*,now=None):
+    def reject(self,user_id,channel_id,*,now=None,reason='quota'):
         now=time.time() if now is None else now
         with self.connect() as db:
-            if not db.execute('SELECT 1 FROM generation_events WHERE user_id=? AND reason=? AND created>?',(str(user_id),'quota',now-60)).fetchone():
-                db.execute('INSERT INTO generation_events VALUES(?,?,?,?)',(str(user_id),str(channel_id),now,'quota'))
+            if not db.execute('SELECT 1 FROM generation_events WHERE user_id=? AND reason=? AND created>?',(str(user_id),reason,now-60)).fetchone():
+                db.execute('INSERT INTO generation_events VALUES(?,?,?,?)',(str(user_id),str(channel_id),now,reason))
