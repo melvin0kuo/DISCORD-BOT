@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import logging
+import re
 
 from discord.ext import commands
 
@@ -46,6 +47,20 @@ class MusicIntentRouter:
     def __init__(self, bot):
         self.bot = bot
         self._guild_locks = {}
+
+    async def dispatch_explicit(self,message,content):
+        """Execute only an anchored, direct play request, never model text."""
+        match=re.fullmatch(r'(?:請|请|幫我|帮我|麻煩|麻烦|再|重新|\s)*(?:播放|點播|点播)\s*([^\r\n]+)',content.strip())
+        if not match or re.search(r'不要|別|如果|假設|怎麼|如何|方法|是什麼|[?？]',match[1]):return False
+        context=self.context_for(message)
+        if context['reason']=='mention_required':return False
+        if not context['available']:
+            await message.channel.send(context['guidance'])
+            return True
+        logger.info('直接播放請求 user=%s guild=%s',message.author.id,message.guild.id)
+        result=await self.tools_for(message)['control_music']['callback'](action='play',query=match[1].strip())
+        if result.get('status')=='error':await message.channel.send('❌ '+result['message'])
+        return True
 
     def context_for(self, message):
         """即使無法提供工具，也讓模型知道實際限制與下一步。"""

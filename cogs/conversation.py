@@ -163,6 +163,10 @@ class Conversation(commands.Cog):
                 await message.channel.send('🔒 請在私訊中詢問受保護的實作資訊。' if owner else REFUSAL)
                 return
 
+            router=getattr(self,'music_intents',None)
+            if router and await router.dispatch_explicit(message,content):
+                return
+
             if not content and not message.attachments and not message.reference:
                 await message.channel.send(f"{random.choice(self.greetings)}，有什麼我能幫你的嗎？")
                 return

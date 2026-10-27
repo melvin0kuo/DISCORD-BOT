@@ -7,6 +7,36 @@ from discord.ext import commands
 import pytest
 
 
+def test_explicit_play_does_not_depend_on_model_tool_call():
+    async def run():
+        bot,router,message,events=await make_router()
+        try:
+            assert await router.dispatch_explicit(message,'播放中文歌曲')
+            assert events[0][:2]==('play','中文歌曲')
+            assert not await router.dispatch_explicit(message,'不要播放中文歌曲')
+            assert not await router.dispatch_explicit(message,'播放音樂的方法是什麼？')
+            assert len(events)==1
+        finally:await bot.close()
+    asyncio.run(run())
+
+
+def test_direct_play_requires_voice_and_explicit_bot_mention():
+    from unittest.mock import AsyncMock
+    async def run():
+        bot,router,message,events=await make_router()
+        message.channel.send=AsyncMock()
+        try:
+            message.author.voice=None
+            assert await router.dispatch_explicit(message,'播放中文歌曲')
+            assert '語音頻道' in message.channel.send.call_args.args[0]
+            assert not events
+            message.mentions=[]
+            assert not await router.dispatch_explicit(message,'播放中文歌曲')
+            assert not events
+        finally:await bot.close()
+    asyncio.run(run())
+
+
 async def make_router():
     from utils.music_intents import MusicIntentRouter
 
