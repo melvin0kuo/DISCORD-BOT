@@ -94,3 +94,21 @@ def test_manual_mark_accepts_mention_and_only_pings_target(tmp_path,memory_db,ta
         assert [user.id for user in mentions.users]==[597028717948043274]
         assert mentions.everyone is False and mentions.roles is False
     asyncio.run(run())
+
+
+def test_status_displays_real_mention_instead_of_code(tmp_path,memory_db):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from utils.abuse_guard import AbuseGuard
+    from cogs.conversation import Conversation
+    async def run():
+        cog=object.__new__(Conversation);cog.abuse_guard=AbuseGuard(tmp_path/'flags.db')
+        ctx=SimpleNamespace(send=AsyncMock(),channel=SimpleNamespace(id=10))
+        await Conversation.abuse_status.callback(cog,ctx,'<@597028717948043274>')
+        text=ctx.send.call_args.args[0]
+        assert '<@597028717948043274>' in text
+        assert '`597028717948043274`' not in text
+        await Conversation.abuse_mark.callback(cog,ctx,'<@597028717948043274>')
+        assert cog.abuse_guard.get('597028717948043274')
+    asyncio.run(run())

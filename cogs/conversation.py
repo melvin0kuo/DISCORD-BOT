@@ -537,8 +537,8 @@ class Conversation(commands.Cog):
         except ValueError:
             await ctx.send('請輸入 @使用者 或有效的 Discord 使用者 ID。'); return
         row=self.abuse_guard.get(user_id)
-        text=(f'使用者 `{user_id}`：已標記 {row["strikes"]} 次；最近原因：{row["reason"]}。此標記不會封鎖正常提問。'
-              if row else f'使用者 `{user_id}` 目前沒有濫用標記。')
+        text=(f'<@{user_id}>：已標記 {row["strikes"]} 次；最近原因：{row["reason"]}。此標記不會封鎖正常提問。'
+              if row else f'<@{user_id}> 目前沒有濫用標記。')
         await ctx.send(text,allowed_mentions=discord.AllowedMentions.none())
 
     @commands.command(name='abuse_clear',help='擁有者解除標記：!abuse_clear @使用者 或 ID')
@@ -548,11 +548,13 @@ class Conversation(commands.Cog):
         except ValueError:
             await ctx.send('請輸入 @使用者 或有效的 Discord 使用者 ID。'); return
         cleared=self.abuse_guard.clear(user_id)
-        await ctx.send('✅ 已解除標記與待提醒狀態；歷史事件仍保留供稽核。' if cleared else '目前沒有此使用者的標記。')
+        await ctx.send(f'✅ <@{user_id}> 已解除標記與待提醒狀態；歷史事件仍保留供稽核。' if cleared else f'<@{user_id}> 目前沒有濫用標記。',allowed_mentions=discord.AllowedMentions.none())
 
     @commands.command(name='abuse_mark',help='擁有者手動標記並提及警告：!abuse_mark @使用者 原因（亦接受 ID）')
     @commands.is_owner()
-    async def abuse_mark(self,ctx,user_id:str,*,reason:str):
+    async def abuse_mark(self,ctx,user_id:str='',*,reason:str='由擁有者手動標記'):
+        if not user_id:
+            await ctx.send('用法：!abuse_mark @使用者 [原因]；原因可以省略。'); return
         try: user_id=parse_user_id(user_id)
         except ValueError:
             await ctx.send('請輸入 @使用者 或有效的 Discord 使用者 ID。'); return
