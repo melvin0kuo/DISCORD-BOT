@@ -11,7 +11,7 @@ from utils.user_database import user_db
 from utils import music_intents
 from utils.attachment_reader import collect_attachments
 from utils.conversation_security import protected_request, REFUSAL
-from utils.abuse_guard import AbuseGuard, Outcome, abuse_reason
+from utils.abuse_guard import AbuseGuard, Outcome, abuse_reason, parse_user_id
 
 logger = logging.getLogger("discord")
 
@@ -104,7 +104,7 @@ class Conversation(commands.Cog):
                 outcome=Outcome(blocked,'⚠️ 請勿要求大量／無限重複輸出。' if blocked else '')
             if outcome.warning:
                 try:
-                    await message.channel.send(outcome.warning,allowed_mentions=discord.AllowedMentions.none())
+                    await message.channel.send(outcome.warning,allowed_mentions=discord.AllowedMentions(users=[message.author],roles=False,everyone=False,replied_user=False))
                 except Exception:
                     logger.warning('無法發送濫用提醒',exc_info=True)
             if outcome.block:
@@ -530,27 +530,36 @@ class Conversation(commands.Cog):
                 embed.add_field(name=f"{i+1}. {m_id}", value="使用 `!load_local_model <ID>` 載入", inline=False)
             await ctx.send(embed=embed)
 
-    @commands.command(name='abuse_status',help='擁有者查詢使用者的濫用標記：!abuse_status ID')
+    @commands.command(name='abuse_status',help='擁有者查詢標記：!abuse_status @使用者 或 ID')
     @commands.is_owner()
     async def abuse_status(self,ctx,user_id:str):
+        try: user_id=parse_user_id(user_id)
+        except ValueError:
+            await ctx.send('請輸入 @使用者 或有效的 Discord 使用者 ID。'); return
         row=self.abuse_guard.get(user_id)
         text=(f'使用者 `{user_id}`：已標記 {row["strikes"]} 次；最近原因：{row["reason"]}。此標記不會封鎖正常提問。'
               if row else f'使用者 `{user_id}` 目前沒有濫用標記。')
         await ctx.send(text,allowed_mentions=discord.AllowedMentions.none())
 
-    @commands.command(name='abuse_clear',help='擁有者解除濫用標記：!abuse_clear ID')
+    @commands.command(name='abuse_clear',help='擁有者解除標記：!abuse_clear @使用者 或 ID')
     @commands.is_owner()
     async def abuse_clear(self,ctx,user_id:str):
+        try: user_id=parse_user_id(user_id)
+        except ValueError:
+            await ctx.send('請輸入 @使用者 或有效的 Discord 使用者 ID。'); return
         cleared=self.abuse_guard.clear(user_id)
         await ctx.send('✅ 已解除標記與待提醒狀態；歷史事件仍保留供稽核。' if cleared else '目前沒有此使用者的標記。')
 
-    @commands.command(name='abuse_mark',help='擁有者手動標記：!abuse_mark ID 原因；下次互動提醒')
+    @commands.command(name='abuse_mark',help='擁有者手動標記並提及警告：!abuse_mark @使用者 原因（亦接受 ID）')
     @commands.is_owner()
     async def abuse_mark(self,ctx,user_id:str,*,reason:str):
-        if not user_id.isdecimal() or len(user_id)>20:
-            await ctx.send('請輸入有效的 Discord 使用者 ID。'); return
+        try: user_id=parse_user_id(user_id)
+        except ValueError:
+            await ctx.send('請輸入 @使用者 或有效的 Discord 使用者 ID。'); return
         self.abuse_guard.mark(user_id,ctx.channel.id,reason, pending=True)
-        await ctx.send('✅ 已記錄標記，將在下次互動提醒；正常提問仍可使用。')
+        await ctx.send(f'⚠️ <@{user_id}> 已被標記。原因：{reason[:200]}\n請勿洗版或要求無限重複輸出；正常提問仍可使用。',
+                       allowed_mentions=discord.AllowedMentions(users=[discord.Object(id=int(user_id))],roles=False,everyone=False,replied_user=False))
+        self.abuse_guard.acknowledge_warning(user_id)
 
     @commands.command(name="load_local_model", help="在 LM Studio 中載入指定模型")
     @commands.is_owner()

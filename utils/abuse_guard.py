@@ -7,6 +7,12 @@ import time
 import unicodedata
 
 
+def parse_user_id(target):
+    match=re.fullmatch(r'(?:<@!?(\d{1,20})>|(\d{1,20}))',target.strip())
+    if not match or not 0<int(match[1] or match[2])<2**64: raise ValueError('請輸入 @使用者 或 Discord 使用者 ID')
+    return str(int(match[1] or match[2]))
+
+
 def abuse_reason(text):
     text=unicodedata.normalize('NFKC',text).strip()
     text=''.join(c for c in text if unicodedata.category(c)!='Cf')
@@ -87,3 +93,7 @@ class AbuseGuard:
         with self.connect() as db:
             changed=db.execute('DELETE FROM abuse_flags WHERE user_id=?',(str(user_id),)).rowcount
         return bool(changed)
+
+    def acknowledge_warning(self,user_id):
+        with self.connect() as db:
+            db.execute('UPDATE abuse_flags SET pending=0,warned=? WHERE user_id=?',(time.time(),str(user_id)))

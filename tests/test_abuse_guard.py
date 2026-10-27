@@ -66,3 +66,31 @@ def test_conversation_blocks_before_model_even_if_warning_fails(tmp_path,memory_
         cog.llm_handler.get_llm_response_stream.assert_not_called()
         assert cog.abuse_guard.get('1')['strikes']==1
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('target',['@everyone','<@&123>','@name','0','99999999999999999999'])
+def test_invalid_mark_targets_are_rejected(target):
+    from utils.abuse_guard import parse_user_id
+    with pytest.raises(ValueError): parse_user_id(target)
+
+
+@pytest.mark.parametrize('target',['<@597028717948043274>','<@!597028717948043274>','597028717948043274'])
+def test_manual_mark_accepts_mention_and_only_pings_target(tmp_path,memory_db,target):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from utils.abuse_guard import AbuseGuard
+    from cogs.conversation import Conversation
+    async def run():
+        cog=object.__new__(Conversation)
+        cog.abuse_guard=AbuseGuard(tmp_path/'abuse.db')
+        ctx=SimpleNamespace(channel=SimpleNamespace(id=10),send=AsyncMock())
+        await Conversation.abuse_mark.callback(cog,ctx,target,reason='洗版 @everyone <@123>')
+        row=cog.abuse_guard.get('597028717948043274')
+        assert row and not row['pending']
+        text=ctx.send.call_args.args[0]
+        mentions=ctx.send.call_args.kwargs['allowed_mentions']
+        assert '<@597028717948043274>' in text
+        assert [user.id for user in mentions.users]==[597028717948043274]
+        assert mentions.everyone is False and mentions.roles is False
+    asyncio.run(run())
